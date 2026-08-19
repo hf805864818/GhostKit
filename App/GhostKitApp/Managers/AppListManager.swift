@@ -66,7 +66,7 @@ final class AppListManager: ObservableObject {
     }()
 
     private lazy var defaultWorkspace: NSObject? = {
-        guard let cls = applicationWorkspaceClass else { return nil }
+        guard let cls = applicationWorkspaceClass as? NSObject.Type else { return nil }
         let defaultWorkspaceSelector = NSSelectorFromString("defaultWorkspace")
         guard cls.responds(to: defaultWorkspaceSelector) else { return nil }
         let workspace = cls.perform(defaultWorkspaceSelector)?.takeUnretainedValue()

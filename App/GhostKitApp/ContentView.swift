@@ -13,9 +13,14 @@ import UIKit
 // MARK: - Toast helper
 
 /// Lightweight toast shown as a SwiftUI overlay.
-struct ToastData: Equatable {
+struct ToastData: Equatable, Hashable {
     let message: String
     let icon: String?
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(message)
+        hasher.combine(icon)
+    }
 }
 
 struct ToastView: View {
@@ -215,7 +220,7 @@ struct ContentView: View {
                 }
                 Divider()
                 Button {
-                    appManager.reload { _ in
+                    appManager.reload {
                         toast = ToastData(message: "应用列表已刷新", icon: "arrow.clockwise")
                     }
                 } label: {
