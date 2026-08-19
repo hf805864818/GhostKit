@@ -67,6 +67,7 @@ struct GraphicsConfigView: View {
     @State private var showingGamePicker: Bool = false
     @State private var loading: Bool = false
     @State private var toast: ToastData?
+    @State private var errorAlert: ErrorAlert?
 
     private let helper = RootHelperManager.shared
 
@@ -166,6 +167,13 @@ struct GraphicsConfigView: View {
             }
             .overlay { loadingOverlay }
             .toast($toast)
+            .alert(item: $errorAlert) { alert in
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    dismissButton: .default(Text("确定"))
+                )
+            }
         }
     }
 
@@ -246,7 +254,7 @@ struct GraphicsConfigView: View {
             case .success:
                 toast = ToastData(message: "已应用\(selectedPreset.rawValue)配置", icon: "checkmark.circle")
             case .failure(let msg):
-                toast = ToastData(message: "应用失败: \(msg)", icon: "xmark.octagon")
+                errorAlert = ErrorAlert(title: "应用失败", message: msg)
             }
         }
     }
@@ -265,7 +273,7 @@ struct GraphicsConfigView: View {
             case .success:
                 toast = ToastData(message: "已恢复默认配置", icon: "arrow.uturn.backward.circle")
             case .failure(let msg):
-                toast = ToastData(message: "恢复失败: \(msg)", icon: "xmark.octagon")
+                errorAlert = ErrorAlert(title: "恢复失败", message: msg)
             }
         }
     }

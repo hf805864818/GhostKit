@@ -23,6 +23,13 @@ struct ToastData: Equatable, Hashable {
     }
 }
 
+/// Error alert model — stays on screen until user taps "OK".
+struct ErrorAlert: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 struct ToastView: View {
     let data: ToastData
 
@@ -85,6 +92,9 @@ struct ContentView: View {
     // Toast
     @State private var toast: ToastData?
 
+    // Error alert (for RootHelper failures - stays until dismissed)
+    @State private var errorAlert: ErrorAlert?
+
     // Loading overlay
     @State private var loadingMessage: String?
 
@@ -116,6 +126,13 @@ struct ContentView: View {
                 .sheet(isPresented: $showingGraphics) { GraphicsConfigView() }
                 .overlay { loadingOverlay }
                 .toast($toast)
+                .alert(item: $errorAlert) { alert in
+                    Alert(
+                        title: Text(alert.title),
+                        message: Text(alert.message),
+                        dismissButton: .default(Text("确定"))
+                    )
+                }
         }
         .navigationViewStyle(.stack)
         .onAppear {
@@ -426,7 +443,9 @@ struct ContentView: View {
         case .success:
             toast = ToastData(message: successMsg, icon: icon ?? "checkmark.circle")
         case .failure(let msg):
-            toast = ToastData(message: "失败: \(msg)", icon: "xmark.octagon")
+            // Use an alert (not toast) so the user has time to read the error.
+            // The error message includes errno code and description.
+            errorAlert = ErrorAlert(title: "操作失败", message: msg)
         }
     }
 }
