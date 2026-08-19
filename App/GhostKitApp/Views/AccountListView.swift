@@ -4,21 +4,153 @@
 //
 //  App Store account management page.
 //  Lists saved Apple ID accounts, allows adding, deleting and switching.
+//  Accounts are persisted to a JSON file and the currently logged-in
+//  Apple ID is detected from the system.
 //
 
 import SwiftUI
+import Foundation
 
 // MARK: - Account model
 
-struct AppleAccount: Identifiable, Hashable {
-    let id = UUID()
+struct AppleAccount: Identifiable, Hashable, Codable {
+    let id: UUID
     let appleID: String
     let password: String
     let region: String
     var isActive: Bool
 
+    init(appleID: String, password: String, region: String, isActive: Bool) {
+        self.id = UUID()
+        self.appleID = appleID
+        self.password = password
+        self.region = region
+        self.isActive = isActive
+    }
+
     var maskedPassword: String {
         String(repeating: "*", count: max(password.count, 4))
+    }
+}
+
+// MARK: - Account persistence manager
+
+final class AccountStore: ObservableObject {
+    static let shared = AccountStore()
+
+    @Published var accounts: [AppleAccount] = []
+    @Published var systemAppleID: String?
+
+    private let fileURL: URL
+
+    private init() {
+        // Store accounts in the app's documents directory
+        let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        self.fileURL = docsDir.appendingPathComponent("ghostkit_accounts.json")
+        loadAccounts()
+        detectSystemAppleID()
+    }
+
+    // MARK: - Persistence
+
+    func loadAccounts() {
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        accounts = (try? JSONDecoder().decode([AppleAccount].self, from: data)) ?? []
+    }
+
+    func saveAccounts() {
+        do {
+            let data = try JSONEncoder().encode(accounts)
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            print("Failed to save accounts: \(error)")
+        }
+    }
+
+    // MARK: - CRUD
+
+    func add(_ account: AppleAccount) {
+        accounts.append(account)
+        saveAccounts()
+    }
+
+    func delete(_ account: AppleAccount) {
+        accounts.removeAll { $0.id == account.id }
+        saveAccounts()
+    }
+
+    func switchTo(_ account: AppleAccount) {
+        for i in accounts.indices {
+            accounts[i].isActive = (accounts[i].id == account.id)
+        }
+        saveAccounts()
+    }
+
+    // MARK: - Detect current Apple ID from system
+
+    func detectSystemAppleID() {
+        // Method 1: Read from MobileMeAccounts preference plist
+        let plistPath = "/var/mobile/Library/Preferences/MobileMeAccounts.plist"
+        if let dict = NSDictionary(contentsOfFile: plistPath) {
+            // The plist has an "Accounts" array with dictionary entries
+            if let accountsArray = dict["Accounts"] as? [[String: Any]] {
+                for accountDict in accountsArray {
+                    if let accountID = accountDict["AccountID"] as? String,
+                       let isPrimary = accountDict["IsPrimaryAccount"] as? Bool, isPrimary {
+                        systemAppleID = accountID
+                        return
+                    }
+                }
+                // Fallback: first account's AccountID
+                if let first = accountsArray.first,
+                   let accountID = first["AccountID"] as? String {
+                    systemAppleID = accountID
+                    return
+                }
+            }
+        }
+
+        // Method 2: Try reading from Accounts3.sqlite (requires full disk access)
+        let sqlitePath = "/var/mobile/Library/Accounts/Accounts3.sqlite"
+        if FileManager.default.fileExists(atPath: sqlitePath) {
+            // Try to extract Apple ID from the sqlite database
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: sqlitePath)) {
+                // Search for email pattern in the raw sqlite data
+                let rawString = String(data: data, encoding: .utf8) ?? ""
+                let emailPattern = #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#
+                if let regex = try? NSRegularExpression(pattern: emailPattern),
+                   let match = regex.firstMatch(in: rawString, range: NSRange(rawString.startIndex..., in: rawString)) {
+                    if let range = Range(match.range, in: rawString) {
+                        systemAppleID = String(rawString[range])
+                        return
+                    }
+                }
+            }
+        }
+
+        // Method 3: Try reading from keychain (app has apple keychain access group)
+        // Look for "com.apple.account.AppleID" in keychain
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassInternetPassword,
+            kSecAttrServer as String: "appleid.apple.com",
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnAttributes as String: true,
+        ]
+        var result: AnyObject?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let dict = result as? [String: Any],
+           let account = dict[kSecAttrAccount as String] as? String {
+            systemAppleID = account
+            return
+        }
+
+        systemAppleID = nil
+    }
+
+    /// Refresh the system Apple ID detection.
+    func refreshSystemAccount() {
+        detectSystemAppleID()
     }
 }
 
@@ -26,11 +158,7 @@ struct AppleAccount: Identifiable, Hashable {
 
 struct AccountListView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var accounts: [AppleAccount] = [
-        AppleAccount(appleID: "main@icloud.com", password: "password123", region: "中国", isActive: true),
-        AppleAccount(appleID: "us@gmail.com", password: "password456", region: "美国", isActive: false),
-        AppleAccount(appleID: "jp@yahoo.com", password: "password789", region: "日本", isActive: false),
-    ]
+    @StateObject private var store = AccountStore.shared
 
     @State private var showingAddSheet: Bool = false
     @State private var newAppleID: String = ""
@@ -42,14 +170,61 @@ struct AccountListView: View {
     var body: some View {
         NavigationView {
             List {
-                if accounts.isEmpty {
-                    Text("暂无已保存账号")
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .listRowSeparator(.hidden)
-                } else {
-                    Section("已保存账号") {
-                        ForEach(accounts) { account in
+                // System account section
+                Section("当前设备登录") {
+                    if let appleID = store.systemAppleID {
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.crop.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(.blue)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(appleID)
+                                    .font(.system(size: 15, weight: .medium))
+                                Text("系统当前登录的 Apple ID")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Text("系统")
+                                .font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.green.opacity(0.15))
+                                .foregroundColor(.green)
+                                .clipShape(Capsule())
+                        }
+                    } else {
+                        HStack(spacing: 12) {
+                            Image(systemName: "person.crop.circle.badge.questionmark")
+                                .font(.title2)
+                                .foregroundColor(.secondary)
+                            Text("未检测到已登录的 Apple ID")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button {
+                                store.refreshSystemAccount()
+                                showToast(message: store.systemAppleID != nil
+                                          ? "检测到: \(store.systemAppleID!)"
+                                          : "仍未检测到 Apple ID")
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.caption)
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
+                }
+
+                // Saved accounts section
+                Section("已保存账号") {
+                    if store.accounts.isEmpty {
+                        Text("暂无已保存账号，点击右上角 + 添加")
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .listRowSeparator(.hidden)
+                    } else {
+                        ForEach(store.accounts) { account in
                             accountRow(account)
                                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                     Button(role: .destructive) {
@@ -198,7 +373,7 @@ struct AccountListView: View {
             region: newRegion,
             isActive: false
         )
-        accounts.append(account)
+        store.add(account)
         resetAddFields()
         showingAddSheet = false
         showToast(message: "账号已添加")
@@ -209,14 +384,12 @@ struct AccountListView: View {
             showToast(message: "无法删除当前活跃账号")
             return
         }
-        accounts.removeAll { $0.id == account.id }
+        store.delete(account)
         showToast(message: "账号已删除")
     }
 
     private func switchAccount(_ account: AppleAccount) {
-        for i in accounts.indices {
-            accounts[i].isActive = (accounts[i].id == account.id)
-        }
+        store.switchTo(account)
         showToast(message: "已切换至 \(account.appleID)")
     }
 

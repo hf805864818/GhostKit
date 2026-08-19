@@ -491,11 +491,17 @@ jobs:
           mkdir -p Payload
           cp -r "${APP_PATH}" Payload/
 
-          # 使用 ldid 签名（如果可用）
+          # 使用 ldid 签名（嵌入 entitlements）
           if command -v ldid &> /dev/null; then
-            echo "使用 ldid 伪签名..."
+            echo "使用 ldid 伪签名（含 entitlements）..."
+            ENTITLEMENTS="App/GhostKitApp/Entitlements/GhostKit.entitlements"
             find Payload -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
-            ldid -S Payload/*.app 2>/dev/null || true
+            # Main app binary: embed entitlements
+            ldid -S"${ENTITLEMENTS}" Payload/*.app/* 2>/dev/null || \
+              ldid -S Payload/*.app 2>/dev/null || true
+            # RootHelper: fakesign without entitlements
+            find Payload -name "RootHelper" -exec ldid -S {} \; 2>/dev/null || true
+            echo "Entitlements embedded"
           fi
 
           # 打包为 .tipa

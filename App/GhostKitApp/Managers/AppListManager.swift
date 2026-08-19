@@ -43,6 +43,7 @@ final class AppListManager: ObservableObject {
     /// Published list of installed applications.
     @Published private(set) var installedApps: [AppInfo] = []
     @Published private(set) var isLoading: Bool = false
+    @Published private(set) var loadError: String?
 
     /// Optional filter text published from the search bar.
     @Published var searchText: String = "" {
@@ -79,12 +80,22 @@ final class AppListManager: ObservableObject {
 
     /// Refresh the cached list of installed applications from the system.
     func reload(completion: (() -> Void)? = nil) {
+        isLoading = true
+        loadError = nil
         DispatchQueue.global(qos: .userInitiated).async {
-            let apps = self.getAllInstalledAppsDirect()
+            // Try LSApplicationWorkspace first, fall back to filesystem scan.
+            var apps = self.getAllInstalledAppsDirect()
+            if apps.isEmpty {
+                apps = self.getAllInstalledAppsFromFilesystem()
+            }
+
             DispatchQueue.main.async {
                 self.allApps = apps
                 self.applyFilter()
                 self.isLoading = false
+                if apps.isEmpty {
+                    self.loadError = "未能获取应用列表，请检查权限或点击刷新重试"
+                }
                 completion?()
             }
         }
@@ -142,6 +153,70 @@ final class AppListManager: ObservableObject {
         return result
     }
 
+    /// Fallback: scan the filesystem for installed apps when the private API
+    /// is unavailable (e.g., entitlements not embedded by TrollStore).
+    func getAllInstalledAppsFromFilesystem() -> [AppInfo] {
+        let searchDirs = [
+            "/var/containers/Bundle/Application",
+            "/Applications",
+            "/private/var/containers/Bundle/Application",
+        ]
+
+        var result: [AppInfo] = []
+        var seenBundleIDs = Set<String>()
+
+        let fm = FileManager.default
+        for searchDir in searchDirs {
+            guard let appDirs = try? fm.contentsOfDirectory(atPath: searchDir) else { continue }
+
+            for appDir in appDirs {
+                let appPath = "\(searchDir)/\(appDir)"
+                // Find .app bundles inside
+                guard let contents = try? fm.contentsOfDirectory(atPath: appPath) else { continue }
+
+                for item in contents where item.hasSuffix(".app") {
+                    let appBundlePath = "\(appPath)/\(item)"
+                    let infoPlistPath = "\(appBundlePath)/Info.plist"
+
+                    guard let info = NSDictionary(contentsOfFile: infoPlistPath) else { continue }
+
+                    let bundleID = (info["CFBundleIdentifier"] as? String) ?? ""
+                    if bundleID.isEmpty || seenBundleIDs.contains(bundleID) { continue }
+                    seenBundleIDs.insert(bundleID)
+
+                    let name = (info["CFBundleDisplayName"] as? String) ??
+                               (info["CFBundleName"] as? String) ??
+                               bundleID
+                    let version = (info["CFBundleVersion"] as? String) ?? "1.0"
+                    let shortVersion = (info["CFBundleShortVersionString"] as? String) ?? version
+
+                    let bundleURL = URL(fileURLWithPath: appBundlePath)
+                    let isSystem = searchDir == "/Applications"
+
+                    // Load icon from bundle
+                    let icon = self.loadIconFromFile(bundlePath: appBundlePath, info: info)
+
+                    result.append(AppInfo(
+                        bundleIdentifier: bundleID,
+                        name: name,
+                        version: version,
+                        shortVersion: shortVersion,
+                        icon: icon,
+                        bundleURL: bundleURL,
+                        dataContainerURL: nil,
+                        isSystemApp: isSystem
+                    ))
+                }
+            }
+        }
+
+        result.sort { lhs, rhs in
+            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+
+        return result
+    }
+
     /// Case-insensitive keyword search across name and bundle identifier.
     func search(keyword: String) -> [AppInfo] {
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -176,6 +251,34 @@ final class AppListManager: ObservableObject {
         guard proxy.responds(to: sel) else { return nil }
         let value = proxy.perform(sel)?.takeUnretainedValue()
         return (value as? NSNumber)?.boolValue
+    }
+
+    /// Load icon from Info.plist + AppIcon60@2x.png from the bundle on disk.
+    private func loadIconFromFile(bundlePath: String, info: NSDictionary) -> UIImage? {
+        if let icons = info["CFBundleIcons"] as? [String: Any],
+           let primary = icons["CFBundlePrimaryIcon"] as? [String: Any],
+           let files = primary["CFBundleIconFiles"] as? [String],
+           let largest = files.last {
+            let iconURL = URL(fileURLWithPath: bundlePath).appendingPathComponent("\(largest)@2x.png")
+            if let data = try? Data(contentsOf: iconURL) {
+                return UIImage(data: data)
+            }
+            let plainURL = URL(fileURLWithPath: bundlePath).appendingPathComponent("\(largest).png")
+            if let data = try? Data(contentsOf: plainURL) {
+                return UIImage(data: data)
+            }
+        }
+        // Check CFBundleIcons~ipad as well
+        if let icons = info["CFBundleIcons~ipad"] as? [String: Any],
+           let primary = icons["CFBundlePrimaryIcon"] as? [String: Any],
+           let files = primary["CFBundleIconFiles"] as? [String],
+           let largest = files.last {
+            let iconURL = URL(fileURLWithPath: bundlePath).appendingPathComponent("\(largest)@2x.png")
+            if let data = try? Data(contentsOf: iconURL) {
+                return UIImage(data: data)
+            }
+        }
+        return UIImage(systemName: "app.fill")
     }
 
     /// Resolve and load an application icon.

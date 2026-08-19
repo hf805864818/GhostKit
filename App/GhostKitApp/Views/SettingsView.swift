@@ -59,9 +59,9 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Link(destination: URL(string: "https://github.com/ghostkit")!) {
+                    Link(destination: URL(string: "https://t.me/hfkj520")!) {
                         HStack {
-                            Label("GitHub 仓库", systemImage: "link")
+                            Label("Telegram 频道", systemImage: "paperplane")
                             Spacer()
                             Image(systemName: "arrow.up.right.square")
                                 .foregroundColor(.secondary)

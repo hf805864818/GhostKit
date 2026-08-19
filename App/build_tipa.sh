@@ -85,6 +85,28 @@ if [ -f "${ROOTHELPER_BIN}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Step 5b - Fakesign binaries with entitlements via ldid
+#           TrollStore reads embedded entitlements from the code signature.
+# ---------------------------------------------------------------------------
+ENTITLEMENTS="${PROJECT_DIR}/GhostKitApp/Entitlements/GhostKit.entitlements"
+if command -v ldid &> /dev/null; then
+    echo "==> Fakesigning with entitlements via ldid"
+    # Main app binary
+    ldid -S"${ENTITLEMENTS}" "${APP_BUNDLE}/GhostKit" 2>/dev/null || \
+        echo "Warning: ldid failed for main binary, continuing without entitlements"
+    # RootHelper binary
+    if [ -f "${APP_BUNDLE}/RootHelper" ]; then
+        ldid -S "${APP_BUNDLE}/RootHelper" 2>/dev/null || true
+    fi
+    # Any embedded .dylib
+    find "${APP_BUNDLE}" -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
+    echo "==> Entitlements embedded"
+else
+    echo "Warning: ldid not found, entitlements will NOT be embedded"
+    echo "         This may cause private API failures at runtime"
+fi
+
+# ---------------------------------------------------------------------------
 # Step 6 - Create Payload directory & package as .tipa (zip)
 # ---------------------------------------------------------------------------
 rm -rf "${PAYLOAD_DIR}"

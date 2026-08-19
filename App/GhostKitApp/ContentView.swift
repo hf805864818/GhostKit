@@ -126,8 +126,14 @@ struct ContentView: View {
     // MARK: - List content
 
     @ViewBuilder private var listContent: some View {
-        if appManager.displayedApps.isEmpty && appManager.searchText.isEmpty {
-            emptyState
+        if appManager.isLoading {
+            loadingState
+        } else if appManager.displayedApps.isEmpty && appManager.searchText.isEmpty {
+            if let error = appManager.loadError {
+                errorState(message: error)
+            } else {
+                emptyState
+            }
         } else if appManager.displayedApps.isEmpty {
             noResultsState
         } else {
@@ -149,15 +155,45 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Empty states
+    // MARK: - Loading state
 
-    private var emptyState: some View {
+    private var loadingState: some View {
         VStack(spacing: 14) {
             ProgressView()
                 .scaleEffect(1.4)
             Text("正在加载应用列表…")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom) { iosVersionFooter }
+    }
+
+    // MARK: - Error state
+
+    private func errorState(message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 40))
+                .foregroundColor(.orange)
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            Button {
+                appManager.reload {
+                    if !appManager.displayedApps.isEmpty {
+                        toast = ToastData(message: "应用列表已刷新", icon: "arrow.clockwise")
+                    }
+                }
+            } label: {
+                Label("重新加载", systemImage: "arrow.clockwise")
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.blue.opacity(0.15))
+                    .foregroundColor(.blue)
+                    .clipShape(Capsule())
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .bottom) { iosVersionFooter }
