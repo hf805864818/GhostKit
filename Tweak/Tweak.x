@@ -110,7 +110,7 @@ static NSString *const kNotifRestoreDefaultGraphics = @"GhostKitRestoreDefaultGr
 // ---------------------------------------------------------------------------
 
 static void ghostkit_darwin_callback(CFNotificationCenterRef center,
-                                      const void *observer,
+                                      void *observer,
                                       CFStringRef name,
                                       const void *object,
                                       CFDictionaryRef userInfo)
