@@ -2,6 +2,19 @@
 
 所有显著变更都会记录在此文件中。
 
+## v1.0.9 - 2026-08-19
+
+### ✨ 新功能
+- (无)
+
+### 🐛 问题修复
+- compile error (missing emptyState) and ldid entitlements signing
+- app list loading, account management, and TG link
+
+### 📦 其他变更
+- [0;32m[INFO][0m 获取提交记录范围: v1.0.7..HEAD
+- chore(release): v1.0.8 [skip ci]
+
 ## v1.0.8 - 2026-08-19
 
 ### ✨ 新功能
