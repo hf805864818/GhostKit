@@ -2,6 +2,18 @@
 
 所有显著变更都会记录在此文件中。
 
+## v1.0.6 - 2026-08-19
+
+### ✨ 新功能
+- (无)
+
+### 🐛 问题修复
+- resolve 303 Unable to locate main binary error
+
+### 📦 其他变更
+- [0;32m[INFO][0m 获取提交记录范围: v1.0.6..HEAD
+- chore(release): v1.0.5 [skip ci]
+
 ## v1.0.5 - 2026-08-19
 
 ### ✨ 新功能
