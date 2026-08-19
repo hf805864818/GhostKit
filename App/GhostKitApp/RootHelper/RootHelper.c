@@ -1,0 +1,1167 @@
+/*
+ * RootHelper.c
+ * GhostKit
+ *
+ * Privileged C helper for GhostKit.  Spawned by RootHelperManager (Swift)
+ * to perform root-level operations on an iOS device installed via TrollStore.
+ *
+ * The binary inherits the TrollStore entitlements and runs as root, so every
+ * file-system and database operation below is already fully privileged.
+ *
+ * Operations:
+ *   clean_keychain, deep_clean_keychain, delete_all_keychains, restore_keychains
+ *   reset_idfa, clean_system, clean_cache, clean_data_dir, clean_cookies
+ *   reset_device, allow_paste_all, respring, ldrestart
+ *   uninstall_app, apply_config
+ *
+ * Compile:
+ *   xcrun -sdk iphoneos cc -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+ *       -o RootHelper RootHelper.c -lsqlite3 -framework Foundation
+ *       -framework MobileCoreServices -framework CoreFoundation
+ */
+
+#include "RootHelper.h"
+#include <sqlite3.h>
+#include <fts.h>
+#include <stdarg.h>
+#include <fts.h>
+
+extern char **environ;
+
+/* ===========================================================================
+ * Internal helpers
+ * ========================================================================= */
+
+/* Simple boolean */
+typedef int bool_t;
+#define TRUE  1
+#define FALSE 0
+
+/* Log a message to stderr (captured by RootHelperManager). */
+#define LOG(fmt, ...) \
+    fprintf(stderr, "[RootHelper] " fmt "\n", ##__VA_ARGS__)
+
+/* Log to stdout (captured as success message). */
+#define LOG_OK(fmt, ...) \
+    printf("[RootHelper] " fmt "\n", ##__VA_ARGS__)
+
+/* --------------------------------------------------------------------------
+ * posix_spawn wrapper
+ * ------------------------------------------------------------------------ */
+
+int run_root_command(const char *command, const char *const argv[]) {
+    if (command == NULL) {
+        return -1;
+    }
+
+    pid_t pid = 0;
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+
+    int status = posix_spawnp(&pid, command, &actions, NULL,
+                              (char *const *)(argv ? argv : (const char *const[]){command, NULL}),
+                              environ);
+    posix_spawn_file_actions_destroy(&actions);
+
+    if (status != 0) {
+        LOG("posix_spawn failed for '%s': %s", command, strerror(status));
+        return -1;
+    }
+
+    int exit_status = 0;
+    waitpid(pid, &exit_status, 0);
+
+    if (WIFEXITED(exit_status)) {
+        return WEXITSTATUS(exit_status);
+    }
+    return -1;
+}
+
+int run_simple(const char *binary, ...) {
+    if (binary == NULL) {
+        return -1;
+    }
+
+    const char *argv[32];
+    int argc = 0;
+    argv[argc++] = binary;
+
+    va_list ap;
+    va_start(ap, binary);
+    const char *arg;
+    while ((arg = va_arg(ap, const char *)) != NULL && argc < 31) {
+        argv[argc++] = arg;
+    }
+    va_end(ap);
+    argv[argc] = NULL;
+
+    return run_root_command(binary, argv);
+}
+
+/* --------------------------------------------------------------------------
+ * File-system utilities
+ * ------------------------------------------------------------------------ */
+
+int remove_directory_tree(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return -1;
+    }
+
+    char *const paths[] = { (char *)path, NULL };
+    FTS *fts = fts_open(paths, FTS_NOCHDIR | FTS_PHYSICAL, NULL);
+    if (fts == NULL) {
+        LOG("fts_open failed for '%s': %s", path, strerror(errno));
+        return -1;
+    }
+
+    FTSENT *entry = NULL;
+    int error = 0;
+    while ((entry = fts_read(fts)) != NULL) {
+        switch (entry->fts_info) {
+            case FTS_DP:   /* post-order directory */
+            case FTS_F:    /* regular file */
+            case FTS_SL:   /* symlink */
+            case FTS_DEFAULT:
+                if (remove(entry->fts_accpath) != 0 && errno != ENOENT) {
+                    LOG("remove '%s' failed: %s", entry->fts_accpath, strerror(errno));
+                    error = -1;
+                }
+                break;
+            case FTS_DNR:
+            case FTS_ERR:
+                LOG("fts error '%s': %s", entry->fts_accpath, strerror(errno));
+                error = -1;
+                break;
+            default:
+                break;
+        }
+    }
+    fts_close(fts);
+    return error;
+}
+
+int copy_file(const char *src, const char *dst) {
+    if (src == NULL || dst == NULL) {
+        return -1;
+    }
+
+    FILE *in = fopen(src, "rb");
+    if (in == NULL) {
+        LOG("copy_file: cannot open source '%s': %s", src, strerror(errno));
+        return -1;
+    }
+
+    FILE *out = fopen(dst, "wb");
+    if (out == NULL) {
+        LOG("copy_file: cannot open dest '%s': %s", dst, strerror(errno));
+        fclose(in);
+        return -1;
+    }
+
+    char buffer[65536];
+    size_t n;
+    while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+        if (fwrite(buffer, 1, n, out) != n) {
+            LOG("copy_file: write error: %s", strerror(errno));
+            fclose(in);
+            fclose(out);
+            return -1;
+        }
+    }
+
+    fclose(in);
+    fclose(out);
+
+    /* Preserve permissions */
+    struct stat st;
+    if (stat(src, &st) == 0) {
+        chmod(dst, st.st_mode);
+    }
+    return 0;
+}
+
+/* Make a directory, creating parents as needed. */
+static int mkdir_p(const char *path, mode_t mode) {
+    char tmp[MAX_CMD_LEN];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    size_t len = strlen(tmp);
+    if (len > 0 && tmp[len - 1] == '/') {
+        tmp[len - 1] = '\0';
+    }
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, mode);
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+        LOG("mkdir_p '%s' failed: %s", tmp, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * SQLite helper
+ * ------------------------------------------------------------------------ */
+
+/* Execute a single SQL statement (no results). Returns 0 on success. */
+static int sql_exec(const char *db_path, const char *sql) {
+    sqlite3 *db = NULL;
+    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
+        LOG("sql_exec: cannot open '%s': %s", db_path, sqlite3_errmsg(db));
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+
+    char *errmsg = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
+    if (rc != SQLITE_OK) {
+        LOG("sql_exec failed: %s (rc=%d)", errmsg ? errmsg : "unknown", rc);
+        if (errmsg) sqlite3_free(errmsg);
+        sqlite3_close(db);
+        return -1;
+    }
+
+    sqlite3_close(db);
+    return 0;
+}
+
+/* Execute a parameterised SQL statement with one text binding. */
+static int sql_exec_text(const char *db_path, const char *sql, const char *param) {
+    sqlite3 *db = NULL;
+    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
+        LOG("sql_exec_text: cannot open '%s'", db_path);
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        LOG("sql_exec_text: prepare failed: %s", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return -1;
+    }
+
+    if (param) {
+        sqlite3_bind_text(stmt, 1, param, -1, SQLITE_STATIC);
+    }
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        LOG("sql_exec_text: step failed: rc=%d", rc);
+        return -1;
+    }
+    return 0;
+}
+
+/* ===========================================================================
+ * Keychain operations
+ * ========================================================================= */
+
+int clean_keychain(const char *bundleID) {
+    if (bundleID == NULL) {
+        return -1;
+    }
+
+    LOG("clean_keychain for '%s'", bundleID);
+
+    /*
+     * keychain-2.db schema (root-only):
+     *   genp  - generic passwords  (acct, svce, agrp)
+     *   inet  - internet passwords (acct, svce, agrp)
+     *   cert  - certificates       (agrp)
+     *   keys  - keys               (agrp)
+     *   mupd  - managed items      (agrp)
+     *   otlp  - one-time passwords (acct, svce, agrp)
+     *
+     * Delete every row whose access group (agrp) or account (acct)
+     * contains the bundle identifier.
+     */
+    const char *tables[] = { "genp", "inet", "cert", "keys", "mupd", "otlp" };
+    int table_count = sizeof(tables) / sizeof(tables[0]);
+
+    char sql[512];
+    int errors = 0;
+
+    for (int i = 0; i < table_count; i++) {
+        snprintf(sql, sizeof(sql),
+                 "DELETE FROM %s WHERE agrp LIKE '%%%s%%' OR acct LIKE '%%%s%%';",
+                 tables[i], bundleID, bundleID);
+        if (sql_exec(KEYCHAIN_DB_PATH, sql) != 0) {
+            errors++;
+        }
+    }
+
+    /* Also clean the keychain metadata table (persists deleted item references). */
+    sql_exec(KEYCHAIN_DB_PATH,
+             "DELETE FROM metadata WHERE rowid IN "
+             "(SELECT rowid FROM metadata WHERE label LIKE 'apple.default-identifier' "
+             "OR label LIKE 'apple.default-keychain');");
+
+    if (errors > 0) {
+        LOG("clean_keychain completed with %d table errors", errors);
+    }
+    LOG_OK("clean_keychain done for '%s'", bundleID);
+    return errors == 0 ? 0 : -1;
+}
+
+int deep_clean_keychain(const char *bundleID) {
+    if (bundleID == NULL) {
+        return -1;
+    }
+
+    LOG("deep_clean_keychain for '%s'", bundleID);
+
+    /* Deep clean removes ALL rows that could be associated, including
+     * group access table entries, sync views, and the backup metadata. */
+    const char *tables[] = {
+        "genp", "inet", "cert", "keys", "mupd", "otlp",
+        "grp", "access_groups"
+    };
+    int table_count = sizeof(tables) / sizeof(tables[0]);
+
+    char sql[512];
+    int errors = 0;
+
+    for (int i = 0; i < table_count; i++) {
+        snprintf(sql, sizeof(sql),
+                 "DELETE FROM %s WHERE agrp LIKE '%%%s%%' OR acct LIKE '%%%s%%' "
+                 "OR svce LIKE '%%%s%%';",
+                 tables[i], bundleID, bundleID, bundleID);
+        if (sql_exec(KEYCHAIN_DB_PATH, sql) != 0) {
+            /* Table may not exist on this iOS version; ignore. */
+        }
+    }
+
+    /* Also clear the trust store entries for this app. */
+    {
+        char trust_sql[512];
+        snprintf(trust_sql, sizeof(trust_sql),
+                 "DELETE FROM trust_record WHERE subject LIKE '%%%s%%';", bundleID);
+        sql_exec(KEYCHAIN_DB_PATH, trust_sql);
+    }
+
+    /* Vacuum to compact the database after deletion. */
+    sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
+
+    LOG_OK("deep_clean_keychain done for '%s'", bundleID);
+    return errors == 0 ? 0 : 0;
+}
+
+int delete_all_keychains(void) {
+    LOG("delete_all_keychains - backing up then truncating");
+
+    /* Create backup directory. */
+    mkdir_p(KEYCHAIN_BACKUP_DIR, 0755);
+
+    /* Back up the keychain database. */
+    char backup_path[MAX_CMD_LEN];
+    snprintf(backup_path, sizeof(backup_path), "%s/keychain-2.db", KEYCHAIN_BACKUP_DIR);
+    copy_file(KEYCHAIN_DB_PATH, backup_path);
+    LOG("Backed up keychain to '%s'", backup_path);
+
+    /* Truncate all data tables. */
+    const char *tables[] = {
+        "genp", "inet", "cert", "keys", "mupd", "otlp",
+        "access_groups", "grp", "trust_record", "pupd", "sxp"
+    };
+    int table_count = sizeof(tables) / sizeof(tables[0]);
+
+    char sql[256];
+    for (int i = 0; i < table_count; i++) {
+        snprintf(sql, sizeof(sql), "DELETE FROM %s;", tables[i]);
+        sql_exec(KEYCHAIN_DB_PATH, sql);
+    }
+
+    sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
+
+    LOG_OK("delete_all_keychains done");
+    return 0;
+}
+
+int restore_keychains(void) {
+    LOG("restore_keychains from backup");
+
+    char backup_path[MAX_CMD_LEN];
+    snprintf(backup_path, sizeof(backup_path), "%s/keychain-2.db", KEYCHAIN_BACKUP_DIR);
+
+    struct stat st;
+    if (stat(backup_path, &st) != 0) {
+        LOG("restore_keychains: no backup found at '%s'", backup_path);
+        return -1;
+    }
+
+    /* Close any open keychain connections by restarting securityd. */
+    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    usleep(500000);
+
+    /* Restore the backup over the live database. */
+    if (copy_file(backup_path, KEYCHAIN_DB_PATH) != 0) {
+        LOG("restore_keychains: copy failed");
+        run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+        return -1;
+    }
+
+    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+
+    LOG_OK("restore_keychains done");
+    return 0;
+}
+
+/* ===========================================================================
+ * IDFA
+ * ========================================================================= */
+
+int reset_idfa(void) {
+    LOG("reset_idfa");
+
+    /*
+     * The advertising identifier is cached in several locations.
+     * Deleting these forces iOS to generate a fresh IDFA on the next
+     * ASIdentifierManager query.
+     */
+    const char *idfa_files[] = {
+        "/private/var/mobile/Library/com.apple.adcenterd/IDFA.db",
+        "/private/var/mobile/Library/com.apple.adcenterd/adattribution.db",
+        "/private/var/mobile/Library/com.apple.adcenterd/adattribution.db-wal",
+        "/private/var/mobile/Library/com.apple.adcenterd/adattribution.db-shm",
+        "/private/var/mobile/Library/Caches/adid.plist",
+        "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.advertising",
+        "/private/var/mobile/Library/Preferences/com.apple.advertisingIdentifier.plist",
+    };
+    int count = sizeof(idfa_files) / sizeof(idfa_files[0]);
+
+    for (int i = 0; i < count; i++) {
+        struct stat st;
+        if (stat(idfa_files[i], &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                remove_directory_tree(idfa_files[i]);
+            } else {
+                unlink(idfa_files[i]);
+            }
+            LOG("Removed IDFA file: %s", idfa_files[i]);
+        }
+    }
+
+    /* Also clear the IDFA from the sqlite DB if present. */
+    sql_exec(IDFA_DB_PATH, "DELETE FROM idfa;");
+
+    /* Reset the ASIdentifierManager preference. */
+    run_simple("/usr/bin/defaults", "delete",
+               "com.apple.advertisingIdentifier", "ADIdentifier", NULL);
+    run_simple("/usr/bin/defaults", "delete",
+               "com.apple.advertisingIdentifier", "ASIdentifierManager", NULL);
+
+    LOG_OK("reset_idfa done");
+    return 0;
+}
+
+/* ===========================================================================
+ * System & cache cleaning
+ * ========================================================================= */
+
+int clean_system(void) {
+    LOG("clean_system");
+
+    /* Clean /tmp */
+    run_simple("/bin/rm", "-rf", "/tmp/*", NULL);
+    run_simple("/bin/rm", "-rf", "/tmp/.*", NULL);
+
+    /* Clean /var/tmp */
+    run_simple("/bin/rm", "-rf", "/private/var/tmp/*", NULL);
+
+    /* Clean mobile caches */
+    remove_directory_tree("/private/var/mobile/Library/Caches/Snapshots");
+    remove_directory_tree("/private/var/mobile/Library/Caches/com.apple.appstore");
+    remove_directory_tree("/private/var/mobile/Library/Caches/com.apple.itunescloudd");
+
+    /* Clean system logs */
+    run_simple("/bin/rm", "-rf", "/private/var/log/*.log", NULL);
+
+    /* Clean diagnostic logs */
+    remove_directory_tree("/private/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs");
+
+    /* Clean SpringBoard cache */
+    remove_directory_tree("/private/var/mobile/Library/Caches/com.apple.springboard");
+
+    LOG_OK("clean_system done");
+    return 0;
+}
+
+/* Find an app's data container path by scanning Containers directory. */
+static int find_data_container(const char *bundleID, char *out_path, size_t out_len) {
+    if (bundleID == NULL || out_path == NULL || out_len == 0) {
+        return -1;
+    }
+
+    const char *data_root = "/private/var/mobile/Containers/Data/Application";
+    DIR *dir = opendir(data_root);
+    if (dir == NULL) {
+        LOG("find_data_container: cannot open '%s'", data_root);
+        return -1;
+    }
+
+    struct dirent *entry;
+    int found = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') {
+            continue;
+        }
+        /* Check the .com.apple.mobile_container_manager metadata plist. */
+        char plist_path[MAX_CMD_LEN];
+        snprintf(plist_path, sizeof(plist_path),
+                 "%s/%s/.com.apple.mobile_container_manager",
+                 data_root, entry->d_name);
+
+        FILE *f = fopen(plist_path, "r");
+        if (f == NULL) {
+            continue;
+        }
+
+        /* Read plist as binary plist; check for bundleID in the XML. */
+        char line[1024];
+        while (fgets(line, sizeof(line), f) != NULL) {
+            if (strstr(line, bundleID) != NULL) {
+                snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
+                found = 1;
+                break;
+            }
+        }
+        fclose(f);
+
+        if (found) {
+            break;
+        }
+
+        /* Fallback: check the BundleMetadata plist. */
+        char meta_path[MAX_CMD_LEN];
+        snprintf(meta_path, sizeof(meta_path),
+                 "%s/%s/.com.apple.mobile_container_manager/BundleMetadata.plist",
+                 data_root, entry->d_name);
+        /* The metadata plist is binary, so check with plutil. */
+        char cmd[MAX_CMD_LEN];
+        snprintf(cmd, sizeof(cmd),
+                 "/usr/bin/plutil -p '%s' 2>/dev/null | grep -q '%s'",
+                 meta_path, bundleID);
+        if (system(cmd) == 0) {
+            snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
+            found = 1;
+            break;
+        }
+    }
+    closedir(dir);
+
+    return found ? 0 : -1;
+}
+
+int clean_cache(const char *bundleID) {
+    if (bundleID == NULL) {
+        return -1;
+    }
+
+    LOG("clean_cache for '%s'", bundleID);
+
+    char container[MAX_CMD_LEN];
+    if (find_data_container(bundleID, container, sizeof(container)) != 0) {
+        LOG("clean_cache: container not found for '%s'", bundleID);
+        return -1;
+    }
+
+    /* Remove Caches, tmp, and Snapshots directories. */
+    char path[MAX_CMD_LEN];
+
+    snprintf(path, sizeof(path), "%s/Library/Caches", container);
+    remove_directory_tree(path);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/tmp", container);
+    remove_directory_tree(path);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/Library/SplashBoard", container);
+    remove_directory_tree(path);
+
+    /* Clean the app's preferences cache. */
+    snprintf(path, sizeof(path), "/private/var/mobile/Library/Preferences/%s.plist", bundleID);
+    /* Note: We do NOT delete the plist, just reload defaults. */
+
+    LOG_OK("clean_cache done for '%s'", bundleID);
+    return 0;
+}
+
+int clean_data_dir(const char *bundleID) {
+    if (bundleID == NULL) {
+        return -1;
+    }
+
+    LOG("clean_data_dir for '%s'", bundleID);
+
+    char container[MAX_CMD_LEN];
+    if (find_data_container(bundleID, container, sizeof(container)) != 0) {
+        LOG("clean_data_dir: container not found for '%s'", bundleID);
+        return -1;
+    }
+
+    /* Wipe Documents, Library (except Preferences), tmp. */
+    char path[MAX_CMD_LEN];
+
+    snprintf(path, sizeof(path), "%s/Documents", container);
+    remove_directory_tree(path);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/Library/Caches", container);
+    remove_directory_tree(path);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/Library/Cookies", container);
+    remove_directory_tree(path);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/Library/WebKit", container);
+    remove_directory_tree(path);
+
+    snprintf(path, sizeof(path), "%s/tmp", container);
+    remove_directory_tree(path);
+    mkdir(path, 0755);
+
+    LOG_OK("clean_data_dir done for '%s'", bundleID);
+    return 0;
+}
+
+int clean_cookies(const char *bundleID) {
+    if (bundleID == NULL) {
+        return -1;
+    }
+
+    LOG("clean_cookies for '%s'", bundleID);
+
+    char container[MAX_CMD_LEN];
+    if (find_data_container(bundleID, container, sizeof(container)) != 0) {
+        LOG("clean_cookies: container not found for '%s'", bundleID);
+        return -1;
+    }
+
+    char path[MAX_CMD_LEN];
+
+    /* Safari-style cookie databases */
+    snprintf(path, sizeof(path), "%s/Library/Cookies/Cookies.binarycookies", container);
+    unlink(path);
+
+    /* WebKit storage */
+    snprintf(path, sizeof(path), "%s/Library/Cookies", container);
+    remove_directory_tree(path);
+    mkdir(path, 0755);
+
+    snprintf(path, sizeof(path), "%s/Library/WebKit", container);
+    remove_directory_tree(path);
+
+    /* WebKit WebsiteData */
+    snprintf(path, sizeof(path),
+             "%s/Library/WebKit/WebsiteData", container);
+    remove_directory_tree(path);
+
+    /* Network storage (includes localStorage / IndexedDB) */
+    snprintf(path, sizeof(path),
+             "/private/var/mobile/Containers/Data/Application/*/Library/WebKit/*");
+    /* More targeted: the specific container. */
+    snprintf(path, sizeof(path), "%s/Library/WebKit", container);
+    remove_directory_tree(path);
+
+    LOG_OK("clean_cookies done for '%s'", bundleID);
+    return 0;
+}
+
+/* ===========================================================================
+ * Device reset ("一键新机")
+ * ========================================================================= */
+
+int reset_device(void) {
+    LOG("reset_device - full new device reset");
+
+    /* 1. Rotate IDFA */
+    reset_idfa();
+
+    /* 2. Clear the keychain */
+    delete_all_keychains();
+
+    /* 3. Clean all caches */
+    clean_system();
+
+    /* 4. Remove device fingerprint files */
+    const char *fingerprint_files[] = {
+        "/private/var/mobile/Library/Preferences/com.apple.identityservices.idstatuscache.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.identityservices.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.routined.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.locationd.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.iTunesStore.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.appstoreclient.plist",
+        "/private/var/mobile/Library/Preferences/MobileSlideShow.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.mobilephone.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.facetime.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.iMessage.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.Messages.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.ProtectedCloudKeyStore.plist",
+        "/private/var/mobile/Library/Preferences/com.apple.security.plist",
+    };
+    int count = sizeof(fingerprint_files) / sizeof(fingerprint_files[0]);
+    for (int i = 0; i < count; i++) {
+        unlink(fingerprint_files[i]);
+    }
+
+    /* 5. Reset the advertising defaults */
+    run_simple("/usr/bin/defaults", "delete",
+               "com.apple.advertisingIdentifier", NULL);
+
+    /* 6. Remove the wifi/SSID cache (forces re-authentication) */
+    sql_exec("/private/var/mobile/Library/Preferences/com.apple.wifi.plist",
+             "DELETE FROM wifi_networks;");
+
+    /* 7. Reset the Bluetooth cache */
+    run_simple("/bin/rm", "-rf",
+               "/private/var/mobile/Library/Preferences/com.apple.Bluetooth.plist", NULL);
+
+    /* 8. Reset the UDID cache (forces regeneration) */
+    run_simple("/bin/rm", "-rf",
+               "/private/var/mobile/Library/Caches/com.apple.MobileAccessoryUpdater", NULL);
+
+    /* 9. Delete the provisioning profile cache */
+    remove_directory_tree("/private/var/containers/Shared/SystemGroup/"
+                          "systemgroup.com.apple.configurationprofiles");
+
+    LOG_OK("reset_device done - restart recommended");
+    return 0;
+}
+
+/* ===========================================================================
+ * TCC paste permissions
+ * ========================================================================= */
+
+int allow_paste_all(void) {
+    LOG("allow_paste_all - granting paste permission to all apps");
+
+    /*
+     * TCC.db 'access' table schema:
+     *   service         TEXT
+     *   client          TEXT     (bundle ID)
+     *   client_type     INTEGER  (0 = app)
+     *   auth_value      INTEGER  (0=denied, 2=allowed)
+     *   auth_reason     INTEGER
+     *   auth_version    INTEGER
+     *   config_object   BLOB
+     *   config_table    TEXT
+     *   ...
+     *
+     * We insert/UPDATE rows for kTCCServicePasteboard with auth_value=2
+     * for every app found in /var/containers/Bundle/Application.
+     */
+    sqlite3 *db = NULL;
+    if (sqlite3_open(TCC_DB_PATH, &db) != SQLITE_OK) {
+        LOG("allow_paste_all: cannot open TCC.db: %s", sqlite3_errmsg(db));
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+
+    /* First, set all existing paste entries to allowed. */
+    sql_exec(TCC_DB_PATH,
+             "UPDATE access SET auth_value=2, auth_reason=0 "
+             "WHERE service='kTCCServicePasteboard';");
+
+    /* Enumerate all app bundle IDs from the Applications metadata. */
+    const char *bundle_root = "/private/var/containers/Bundle/Application";
+    DIR *dir = opendir(bundle_root);
+    if (dir == NULL) {
+        /* Fallback: also scan the system app list. */
+        dir = opendir("/Applications");
+    }
+
+    if (dir != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_name[0] == '.') {
+                continue;
+            }
+
+            /* Look for .app bundles inside. */
+            char app_dir[MAX_CMD_LEN];
+            snprintf(app_dir, sizeof(app_dir), "%s/%s", bundle_root, entry->d_name);
+
+            DIR *appdir = opendir(app_dir);
+            if (appdir == NULL) {
+                continue;
+            }
+
+            struct dirent *app_entry;
+            while ((app_entry = readdir(appdir)) != NULL) {
+                /* Find *.app directories */
+                char *dot_app = strstr(app_entry->d_name, ".app");
+                if (dot_app == NULL || strcmp(dot_app, ".app") != 0) {
+                    continue;
+                }
+
+                char info_path[MAX_CMD_LEN];
+                snprintf(info_path, sizeof(info_path), "%s/%s/Info.plist",
+                         app_dir, app_entry->d_name);
+
+                /* Extract CFBundleIdentifier using plutil. */
+                char cmd[MAX_CMD_LEN];
+                snprintf(cmd, sizeof(cmd),
+                         "/usr/bin/plutil -extract CFBundleIdentifier raw '%s' 2>/dev/null",
+                         info_path);
+
+                FILE *pipe = popen(cmd, "r");
+                if (pipe == NULL) {
+                    continue;
+                }
+                char bundle_id[512] = {0};
+                if (fgets(bundle_id, sizeof(bundle_id), pipe) != NULL) {
+                    /* Strip trailing newline / quotes. */
+                    size_t len = strlen(bundle_id);
+                    while (len > 0 && (bundle_id[len-1] == '\n' ||
+                                       bundle_id[len-1] == '\r' ||
+                                       bundle_id[len-1] == '"')) {
+                        bundle_id[--len] = '\0';
+                    }
+                    /* Strip leading quotes. */
+                    char *start = bundle_id;
+                    while (*start == '"') start++;
+
+                    if (strlen(start) > 0) {
+                        /* Insert a paste permission row.
+                         * Only the essential columns are set; auth_value=2 means
+                         * "allowed".  We use INSERT OR REPLACE keyed on
+                         * (service, client) so re-runs are idempotent. */
+                        const char *sql =
+                            "INSERT OR REPLACE INTO access "
+                            "(service, client, client_type, auth_value, "
+                            "auth_reason, auth_version, flags) "
+                            "VALUES('kTCCServicePasteboard', ?1, 0, 2, 0, 1, 0);";
+
+                        sqlite3_stmt *stmt = NULL;
+                        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                            sqlite3_bind_text(stmt, 1, start, -1, SQLITE_STATIC);
+                            sqlite3_step(stmt);
+                            sqlite3_finalize(stmt);
+                        }
+                    }
+                }
+                pclose(pipe);
+            }
+            closedir(appdir);
+        }
+        closedir(dir);
+    }
+
+    sqlite3_close(db);
+
+    LOG_OK("allow_paste_all done");
+    return 0;
+}
+
+/* ===========================================================================
+ * UI restart
+ * ========================================================================= */
+
+int respring(void) {
+    LOG("respring");
+
+    /* Kill SpringBoard so it restarts and picks up all changes. */
+    run_simple("/usr/bin/killall", "-9", "SpringBoard", NULL);
+
+    /* If killall is not available, use launchctl. */
+    run_simple("/bin/launchctl", "stop", "com.apple.SpringBoard", NULL);
+    run_simple("/bin/launchctl", "start", "com.apple.SpringBoard", NULL);
+
+    LOG_OK("respring done");
+    return 0;
+}
+
+int ldrestart(void) {
+    LOG("ldrestart");
+
+    struct stat st;
+    if (stat(LDRESTART_PATH, &st) == 0) {
+        run_simple(LDRESTART_PATH, NULL);
+    } else {
+        /* Fallback: restart key daemons individually. */
+        const char *daemons[] = {
+            "com.apple.securityd",
+            "com.apple.cfprefsd",
+            "com.apple.lsd",
+            "com.apple.SpringBoard",
+        };
+        int count = sizeof(daemons) / sizeof(daemons[0]);
+        for (int i = 0; i < count; i++) {
+            run_simple("/bin/launchctl", "stop", daemons[i], NULL);
+            usleep(200000);
+            run_simple("/bin/launchctl", "start", daemons[i], NULL);
+        }
+    }
+
+    LOG_OK("ldrestart done");
+    return 0;
+}
+
+/* ===========================================================================
+ * App uninstall
+ * ========================================================================= */
+
+int uninstall_app(const char *bundleID) {
+    if (bundleID == NULL) {
+        return -1;
+    }
+
+    LOG("uninstall_app '%s'", bundleID);
+
+    /*
+     * Use the MobileInstallation SPI via the LSApplicationWorkspace
+     * private API.  Since this is C, we invoke it through the
+     * lsregister / mic command-line tool or by removing containers directly.
+     *
+     * Approach:
+     *   1. Remove the app bundle from Bundle/Application.
+     *   2. Remove the data container from Data/Application.
+     *   3. Remove the app group container.
+     *   4. Run lsregister to update the LaunchServices database.
+     *   5. Run uicache to refresh icons.
+     */
+
+    /* Remove bundle container(s). */
+    char cmd[MAX_CMD_LEN];
+
+    snprintf(cmd, sizeof(cmd),
+             "/usr/bin/find /private/var/containers/Bundle/Application "
+             "-name '%s.app' -exec rm -rf {} + 2>/dev/null", bundleID);
+    system(cmd);
+
+    snprintf(cmd, sizeof(cmd),
+             "/usr/bin/find /Applications -name '%s.app' -maxdepth 1 "
+             "-exec rm -rf {} + 2>/dev/null", bundleID);
+    system(cmd);
+
+    /* Remove data container. */
+    char container[MAX_CMD_LEN];
+    if (find_data_container(bundleID, container, sizeof(container)) == 0) {
+        remove_directory_tree(container);
+    }
+
+    /* Remove app group containers. */
+    snprintf(cmd, sizeof(cmd),
+             "/usr/bin/find /private/var/containers/Shared/AppGroup "
+             "-name '.com.apple.mobile_container_manager' "
+             "-exec grep -l '%s' {} \\; -exec rm -rf $(dirname {}) \\; 2>/dev/null",
+             bundleID);
+    system(cmd);
+
+    /* Remove plugin containers. */
+    snprintf(cmd, sizeof(cmd),
+             "/usr/bin/find /private/var/containers/Shared/PlugInKit "
+             "-name '.com.apple.mobile_container_manager' "
+             "-exec grep -l '%s' {} \\; -exec rm -rf $(dirname {}) \\; 2>/dev/null",
+             bundleID);
+    system(cmd);
+
+    /* Remove the preferences plist. */
+    snprintf(cmd, sizeof(cmd),
+             "/private/var/mobile/Library/Preferences/%s.plist", bundleID);
+    unlink(cmd);
+
+    /* Update LaunchServices database. */
+    run_simple("/usr/bin/lsregister", "-kill", "-r",
+               "-domain", "system", "-domain", "user", NULL);
+
+    /* Refresh icon cache. */
+    run_simple("/usr/bin/uicache", "-p", bundleID, NULL);
+
+    LOG_OK("uninstall_app done for '%s'", bundleID);
+    return 0;
+}
+
+/* ===========================================================================
+ * Graphics config
+ * ========================================================================= */
+
+int apply_config(const char *bundleID, const char *configPath) {
+    if (bundleID == NULL || configPath == NULL) {
+        return -1;
+    }
+
+    LOG("apply_config '%s' <- '%s'", bundleID, configPath);
+
+    /* Read the JSON config file. */
+    FILE *f = fopen(configPath, "r");
+    if (f == NULL) {
+        LOG("apply_config: cannot read config '%s'", configPath);
+        return -1;
+    }
+
+    char json[4096];
+    size_t n = fread(json, 1, sizeof(json) - 1, f);
+    json[n] = '\0';
+    fclose(f);
+
+    /* Find the app's data container. */
+    char container[MAX_CMD_LEN];
+    if (find_data_container(bundleID, container, sizeof(container)) != 0) {
+        LOG("apply_config: container not found, writing to shared prefs");
+        snprintf(container, sizeof(container), "/private/var/mobile/Library/Preferences");
+    }
+
+    /* Write the config as a plist override in the app's preferences. */
+    char prefs_path[MAX_CMD_LEN];
+    snprintf(prefs_path, sizeof(prefs_path),
+             "%s/Library/Preferences/%s.graphics.plist", container, bundleID);
+
+    /* Ensure the Preferences directory exists. */
+    char prefs_dir[MAX_CMD_LEN];
+    snprintf(prefs_dir, sizeof(prefs_dir), "%s/Library/Preferences", container);
+    mkdir_p(prefs_dir, 0755);
+
+    /* Write the config JSON to a file the app can read. */
+    char config_dest[MAX_CMD_LEN];
+    snprintf(config_dest, sizeof(config_dest),
+             "%s/Documents/graphics_config.json", container);
+    char docs_dir[MAX_CMD_LEN];
+    snprintf(docs_dir, sizeof(docs_dir), "%s/Documents", container);
+    mkdir_p(docs_dir, 0755);
+
+    FILE *out = fopen(config_dest, "w");
+    if (out == NULL) {
+        LOG("apply_config: cannot write to '%s'", config_dest);
+        return -1;
+    }
+    fprintf(out, "%s", json);
+    fclose(out);
+
+    /* Also write the config into the app's preferences plist so it loads
+     * automatically via NSUserDefaults. */
+    /* Use defaults write for each known key. */
+    run_simple("/usr/bin/defaults", "write", bundleID,
+               "GraphicsConfig", json, NULL);
+
+    LOG_OK("apply_config done for '%s'", bundleID);
+    return 0;
+}
+
+/* ===========================================================================
+ * Usage
+ * ========================================================================= */
+
+void print_usage(const char *prog) {
+    fprintf(stderr,
+        "GhostKit RootHelper - privileged system operations\n\n"
+        "Usage: %s <command> [args...]\n\n"
+        "Commands:\n"
+        "  clean-keychain <bundleID>         Remove keychain entries for an app\n"
+        "  deep-clean-keychain <bundleID>    Aggressively clear all keychain data\n"
+        "  delete-all-keychains              Delete entire keychain database\n"
+        "  restore-keychains                  Restore keychain from backup\n"
+        "  reset-idfa                         Rotate the advertising identifier\n"
+        "  clean-system                       Clean system temporary files\n"
+        "  clean-cache <bundleID>            Clear app cache directory\n"
+        "  clean-data-dir <bundleID>         Wipe app data directory\n"
+        "  clean-cookies <bundleID>           Clear app cookies & storage\n"
+        "  reset-device                        Full new-device reset\n"
+        "  allow-paste-all                     Grant paste permission to all apps\n"
+        "  respring                            Restart SpringBoard\n"
+        "  ldrestart                           Restart launch daemons\n"
+        "  uninstall <bundleID>               Uninstall an application\n"
+        "  apply-config <bundleID> <path>     Apply graphics config\n"
+        "  help                                Show this message\n",
+        prog ? prog : "RootHelper");
+}
+
+/* ===========================================================================
+ * main
+ * ========================================================================= */
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    const char *cmd = argv[1];
+
+    /* -- Keychain -- */
+    if (strcmp(cmd, "clean-keychain") == 0) {
+        if (argc < 3) { fprintf(stderr, "Usage: %s clean-keychain <bundleID>\n", argv[0]); return 1; }
+        return clean_keychain(argv[2]);
+    }
+    if (strcmp(cmd, "deep-clean-keychain") == 0) {
+        if (argc < 3) { fprintf(stderr, "Usage: %s deep-clean-keychain <bundleID>\n", argv[0]); return 1; }
+        return deep_clean_keychain(argv[2]);
+    }
+    if (strcmp(cmd, "delete-all-keychains") == 0) {
+        return delete_all_keychains();
+    }
+    if (strcmp(cmd, "restore-keychains") == 0) {
+        return restore_keychains();
+    }
+
+    /* -- IDFA -- */
+    if (strcmp(cmd, "reset-idfa") == 0) {
+        return reset_idfa();
+    }
+
+    /* -- System / cache -- */
+    if (strcmp(cmd, "clean-system") == 0) {
+        return clean_system();
+    }
+    if (strcmp(cmd, "clean-cache") == 0) {
+        if (argc < 3) { fprintf(stderr, "Usage: %s clean-cache <bundleID>\n", argv[0]); return 1; }
+        return clean_cache(argv[2]);
+    }
+    if (strcmp(cmd, "clean-data-dir") == 0) {
+        if (argc < 3) { fprintf(stderr, "Usage: %s clean-data-dir <bundleID>\n", argv[0]); return 1; }
+        return clean_data_dir(argv[2]);
+    }
+    if (strcmp(cmd, "clean-cookies") == 0) {
+        if (argc < 3) { fprintf(stderr, "Usage: %s clean-cookies <bundleID>\n", argv[0]); return 1; }
+        return clean_cookies(argv[2]);
+    }
+
+    /* -- Device -- */
+    if (strcmp(cmd, "reset-device") == 0) {
+        return reset_device();
+    }
+    if (strcmp(cmd, "allow-paste-all") == 0) {
+        return allow_paste_all();
+    }
+    if (strcmp(cmd, "respring") == 0) {
+        return respring();
+    }
+    if (strcmp(cmd, "ldrestart") == 0) {
+        return ldrestart();
+    }
+
+    /* -- Uninstall -- */
+    if (strcmp(cmd, "uninstall") == 0) {
+        if (argc < 3) { fprintf(stderr, "Usage: %s uninstall <bundleID>\n", argv[0]); return 1; }
+        return uninstall_app(argv[2]);
+    }
+
+    /* -- Graphics config -- */
+    if (strcmp(cmd, "apply-config") == 0) {
+        if (argc < 4) { fprintf(stderr, "Usage: %s apply-config <bundleID> <configPath>\n", argv[0]); return 1; }
+        return apply_config(argv[2], argv[3]);
+    }
+
+    /* -- Help -- */
+    if (strcmp(cmd, "help") == 0 || strcmp(cmd, "--help") == 0 ||
+        strcmp(cmd, "-h") == 0) {
+        print_usage(argv[0]);
+        return 0;
+    }
+
+    fprintf(stderr, "Unknown command: %s\n", cmd);
+    print_usage(argv[0]);
+    return 1;
+}

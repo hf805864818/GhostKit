@@ -1,0 +1,267 @@
+/* GhostKit English Localizable.strings */
+
+/* ============================================ */
+/* App Title & Navigation                       */
+/* ============================================ */
+"GhostKit" = "GhostKit";
+"设置" = "Settings";
+"关于" = "About";
+"取消" = "Cancel";
+"确定" = "OK";
+"确认" = "Confirm";
+"完成" = "Done";
+"返回" = "Back";
+"下一步" = "Next";
+"上一步" = "Previous";
+"关闭" = "Close";
+"保存" = "Save";
+"删除" = "Delete";
+"编辑" = "Edit";
+"分享" = "Share";
+"刷新" = "Refresh";
+"搜索" = "Search";
+"搜索、输入名称或标识" = "Search, enter name or identifier";
+"更多" = "More";
+
+/* ============================================ */
+/* Status & Messages                            */
+/* ============================================ */
+"操作成功" = "Operation Successful";
+"操作失败" = "Operation Failed";
+"正在处理..." = "Processing...";
+"请稍候" = "Please wait";
+"无数据" = "No Data";
+"加载中..." = "Loading...";
+"警告" = "Warning";
+"错误" = "Error";
+"提示" = "Notice";
+"成功" = "Success";
+"失败" = "Failed";
+"确定要执行此操作吗？" = "Are you sure you want to perform this operation?";
+"此操作不可撤销" = "This operation cannot be undone";
+"请输入有效内容" = "Please enter valid content";
+"未找到相关应用" = "No related apps found";
+
+/* ============================================ */
+/* Keychain Management                           */
+/* ============================================ */
+"Keychain 管理" = "Keychain Manager";
+"清理 Keychain" = "Clean KeyChain";
+"深度清理 Keychain" = "Deep Clean KeyChain";
+"删除 keychains" = "Delete Keychains";
+"恢复 Keychains" = "Restore Keychains";
+"备份 Keychains" = "Backup Keychains";
+"安全关闭本程序" = "Safe Exit";
+"Keychain 已清理" = "Keychain has been cleaned";
+"Keychain 深度清理完成" = "Keychain deep clean completed";
+"Keychain 已删除" = "Keychain has been deleted";
+"Keychain 已恢复" = "Keychain has been restored";
+"Keychain 备份完成" = "Keychain backup completed";
+"正在清理 Keychain..." = "Cleaning Keychain...";
+"正在深度清理 Keychain..." = "Deep cleaning Keychain...";
+"正在备份 Keychain..." = "Backing up Keychain...";
+"正在恢复 Keychain..." = "Restoring Keychain...";
+"确认清理所有 Keychain 数据？" = "Confirm to clean all Keychain data?";
+"确认深度清理 Keychain？此操作将清除系统级数据" = "Confirm deep clean Keychain? This will clear system-level data";
+"确认删除选中的 Keychain？" = "Confirm to delete selected Keychain?";
+"确认恢复 Keychain？当前数据将被覆盖" = "Confirm to restore Keychain? Current data will be overwritten";
+
+/* ============================================ */
+/* Identifier Management                         */
+/* ============================================ */
+"标识符管理" = "Identifier Manager";
+"刷新标识符" = "Refresh Identifier";
+"变更新标识符" = "Change Identifier";
+"显示当前标识符" = "Show Current Identifier";
+"标识符已刷新" = "Identifier has been refreshed";
+"标识符已变更" = "Identifier has been changed";
+"请输入新的标识符" = "Please enter new identifier";
+"当前设备标识符" = "Current Device Identifier";
+"IDFA" = "IDFA";
+"IDFV" = "IDFV";
+"UDID" = "UDID";
+"序列号" = "Serial Number";
+"IMEI" = "IMEI";
+"MAC 地址" = "MAC Address";
+"确认刷新标识符？" = "Confirm to refresh identifier?";
+"确认变更标识符？" = "Confirm to change identifier?";
+
+/* ============================================ */
+/* One-Click Reset                               */
+/* ============================================ */
+"一键新机" = "Reset Device";
+"一键新机将执行以下操作" = "Reset Device will perform the following operations";
+"- 清理所有 Keychain" = "- Clean all Keychain";
+"- 号新设备标识符 (IDFA)" = "- Generate new device identifier (IDFA)";
+"- 清理所有缓存" = "- Clean all caches";
+"- 清理 Cookie" = "- Clean Cookies";
+"- 清理粘贴板" = "- Clean Clipboard";
+"确认执行一键新机？此操作不可撤销" = "Confirm to reset device? This operation cannot be undone";
+"一键新机完成" = "Device reset completed";
+"正在执行一键新机..." = "Resetting device...";
+
+/* ============================================ */
+/* Cache Cleaning                                */
+/* ============================================ */
+"缓存清理" = "Cache Cleaner";
+"清理系统残留" = "Clean System Residue";
+"清理数据库缓存" = "Clean Database Cache";
+"清理数据目录" = "Clean Data Directory";
+"清理 Cookie" = "Clean Cookies";
+"清理粘贴板" = "Clean Clipboard";
+"系统残留已清理" = "System residue has been cleaned";
+"数据库缓存已清理" = "Database cache has been cleaned";
+"数据目录已清理" = "Data directory has been cleaned";
+"Cookie 已清理" = "Cookies have been cleaned";
+"粘贴板已清理" = "Clipboard has been cleaned";
+"正在清理系统残留..." = "Cleaning system residue...";
+"正在清理数据库缓存..." = "Cleaning database cache...";
+"正在清理数据目录..." = "Cleaning data directory...";
+"正在清理 Cookie..." = "Cleaning cookies...";
+"正在清理粘贴板..." = "Cleaning clipboard...";
+"已释放空间" = "Freed Space";
+"确认清理系统残留？" = "Confirm to clean system residue?";
+"确认清理数据库缓存？" = "Confirm to clean database cache?";
+"确认清理数据目录？" = "Confirm to clean data directory?";
+"确认清理 Cookie？" = "Confirm to clean cookies?";
+"确认清理粘贴板？" = "Confirm to clean clipboard?";
+
+/* ============================================ */
+/* App Management                                */
+/* ============================================ */
+"应用管理" = "App Manager";
+"应用列表" = "App List";
+"应用搜索" = "Search Apps";
+"应用卸载" = "Uninstall App";
+"应用名称" = "App Name";
+"Bundle ID" = "Bundle ID";
+"版本" = "Version";
+"大小" = "Size";
+"安装日期" = "Install Date";
+"系统应用" = "System App";
+"用户应用" = "User App";
+"确认卸载此应用？" = "Confirm to uninstall this app?";
+"卸载成功" = "Uninstalled successfully";
+"卸载失败" = "Uninstall failed";
+"正在卸载..." = "Uninstalling...";
+"个应用" = "apps";
+"没有更多应用" = "No more apps";
+
+/* ============================================ */
+/* App Store Account                             */
+/* ============================================ */
+"App Store 账号管理" = "App Store Account";
+"当前账号" = "Current Account";
+"已登录" = "Signed In";
+"未登录" = "Not Signed In";
+"账号名称" = "Account Name";
+"注销账号" = "Sign Out";
+"切换账号" = "Switch Account";
+"确认注销当前 App Store 账号？" = "Confirm to sign out current App Store account?";
+"已注销" = "Signed Out";
+
+/* ============================================ */
+/* Paste Permission                              */
+/* ============================================ */
+"一键允许粘贴" = "Allow Paste for All Apps";
+"一键允许所有应用粘贴权限" = "Allow paste permission for all apps at once";
+"粘贴权限已开启" = "Paste permission has been enabled";
+"正在设置粘贴权限..." = "Setting paste permissions...";
+"确认为所有应用开启粘贴权限？" = "Confirm to enable paste permission for all apps?";
+
+/* ============================================ */
+/* Game Graphics Config                          */
+/* ============================================ */
+"画质配置" = "Graphics Config";
+"游戏画质配置" = "Game Graphics Configuration";
+"选择游戏" = "Select Game";
+"选择画质" = "Select Graphics Quality";
+"PUBG 流畅画质" = "PUBG Smooth Graphics";
+"PUBG 平衡画质" = "PUBG Balanced Graphics";
+"PUBG 极致画质" = "PUBG Extreme Graphics";
+"流畅" = "Smooth";
+"平衡" = "Balanced";
+"极致" = "Extreme";
+"画质配置已应用" = "Graphics config has been applied";
+"画质配置已恢复" = "Graphics config has been restored";
+"正在应用画质配置..." = "Applying graphics config...";
+"请先选择游戏" = "Please select a game first";
+"请选择画质等级" = "Please select graphics quality";
+"确认应用画质配置？游戏将需要重启" = "Confirm to apply graphics config? Game will need to restart";
+"恢复默认配置" = "Restore Default Config";
+"确认恢复默认画质配置？" = "Confirm to restore default graphics config?";
+"PUBG Mobile" = "PUBG Mobile";
+"王者荣耀" = "Honor of Kings";
+"和平精英" = "Game for Peace";
+"低阴影" = "Low Shadows";
+"中阴影" = "Medium Shadows";
+"高阴影" = "High Shadows";
+"低材质" = "Low Textures";
+"中材质" = "Medium Textures";
+"高材质" = "High Textures";
+"关闭HDR" = "HDR Off";
+"开启HDR" = "HDR On";
+
+/* ============================================ */
+/* Device Info                                   */
+/* ============================================ */
+"设备信息" = "Device Info";
+"设备名称" = "Device Name";
+"设备型号" = "Device Model";
+"系统版本" = "System Version";
+"处理器" = "Processor";
+"内存" = "Memory";
+"存储空间" = "Storage";
+"可用空间" = "Available Space";
+"总空间" = "Total Space";
+"电池电量" = "Battery Level";
+"电池状态" = "Battery Status";
+"正在充电" = "Charging";
+"未充电" = "Not Charging";
+"屏幕分辨率" = "Screen Resolution";
+"运营商" = "Carrier";
+"IP 地址" = "IP Address";
+
+/* ============================================ */
+/* RootHelper                                    */
+/* ============================================ */
+"RootHelper 提权" = "RootHelper Privilege";
+"RootHelper 路径" = "RootHelper Path";
+"请设置 RootHelper 路径" = "Please set RootHelper path";
+"提权成功" = "Privilege escalation successful";
+"提权失败" = "Privilege escalation failed";
+"正在提权..." = "Escalating privileges...";
+"确认执行 RootHelper 提权？" = "Confirm to execute RootHelper privilege escalation?";
+
+/* ============================================ */
+/* Settings                                       */
+/* ============================================ */
+"语言" = "Language";
+"英文" = "English";
+"简体中文" = "Simplified Chinese";
+"繁体中文" = "Traditional Chinese";
+"自动清理" = "Auto Clean";
+"自动清理规则" = "Auto Clean Rules";
+"版本号" = "Version";
+"检查更新" = "Check for Updates";
+"已是最新版本" = "Already the latest version";
+"发现新版本" = "New version available";
+"立即更新" = "Update Now";
+"稍后再说" = "Later";
+"反馈" = "Feedback";
+"关于 GhostKit" = "About GhostKit";
+"开发者" = "Developer";
+"开源许可" = "Open Source Licenses";
+
+/* ============================================ */
+/* Jailbreak Info                                */
+/* ============================================ */
+"越狱方式" = "Jailbreak Method";
+"roothide" = "roothide";
+"RELAXIN" = "RELAXIN";
+"TrollStore" = "TrollStore";
+"Dopamine" = "Dopamine";
+"Palera1n" = "Palera1n";
+"未越狱" = "Not Jailbroken";
+"越狱状态" = "Jailbreak Status";
+"已越狱" = "Jailbroken";

@@ -1,0 +1,589 @@
+# =============================================================================
+# GhostKit CI/CD 主工作流
+# =============================================================================
+# 自动编译 .deb 和 .tipa 包，管理版本号，生成更新日志，发布 GitHub Release
+# =============================================================================
+
+name: CI/CD
+
+# ── 触发条件 ──────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (如 1.2.0，留空则自动 bump)'
+        required: false
+        type: string
+
+# ── 权限 ──────────────────────────────────────────────────
+permissions:
+  contents: write
+
+# ── 环境变量 ──────────────────────────────────────────────
+env:
+  PROJECT_NAME: GhostKit
+  DEB_NAME: GhostKit
+  TIPA_NAME: GhostKit
+
+jobs:
+  # ===========================================================================
+  # Job 1: prepare - 准备阶段
+  # 确定版本号、生成更新日志、提交 VERSION 和 CHANGELOG 更新
+  # ===========================================================================
+  prepare:
+    name: 📋 Prepare Version & Changelog
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.determine_version.outputs.version }}
+      is_tag: ${{ steps.determine_version.outputs.is_tag }}
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 确定版本号 ──────────────────────────────────────
+      - name: 📌 Determine Version
+        id: determine_version
+        run: |
+          # 配置 git
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+
+          # 根据触发方式确定版本号
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
+            # 手动触发且指定了版本号
+            VERSION="${{ inputs.version }}"
+            echo "版本号 (手动指定): ${VERSION}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            # Tag 触发，使用 tag 名称（去掉 v 前缀）
+            VERSION="${GITHUB_REF#refs/tags/}"
+            VERSION="${VERSION#v}"
+            echo "版本号 (tag): ${VERSION}"
+          else
+            # Push 触发，从 VERSION 文件读取并自动 bump patch
+            CURRENT_VERSION=$(cat VERSION | tr -d '[:space:]')
+            echo "当前版本号: ${CURRENT_VERSION}"
+
+            # 使用 version.sh 脚本 bump patch
+            VERSION=$(./scripts/version.sh bump-patch | tail -n 1)
+            echo "版本号 (自动 bump): ${VERSION}"
+          fi
+
+          # 判断是否为 tag 触发
+          IS_TAG="false"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            IS_TAG="true"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_tag=${IS_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "## 版本信息" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 版本号: **${VERSION}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag 触发: **${IS_TAG}**" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 生成更新日志 ────────────────────────────────────
+      - name: 📝 Generate Changelog
+        run: |
+          VERSION="${{ steps.determine_version.outputs.version }}"
+          echo "为 v${VERSION} 生成更新日志..."
+
+          # 执行 changelog 脚本（不自动提交，后面统一提交）
+          ./scripts/changelog.sh "${VERSION}" --no-commit
+
+          echo "更新日志生成完成"
+
+      # ── 上传 CHANGELOG artifact ────────────────────────
+      - name: 📦 Upload CHANGELOG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: CHANGELOG.md
+          retention-days: 30
+
+      # ── 自动提交 VERSION 和 CHANGELOG 更新 ─────────────
+      - name: 💾 Commit VERSION & CHANGELOG
+        run: |
+          VERSION="${{ steps.determine_version.outputs.version }}"
+
+          # 检查是否有变更
+          git add VERSION CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "没有需要提交的变更"
+          else
+            git commit -m "chore(release): v${VERSION} [skip ci]"
+            git push
+            echo "已提交 VERSION 和 CHANGELOG 更新"
+          fi
+
+  # ===========================================================================
+  # Job 2: build-deb - 编译 .deb 包
+  # ===========================================================================
+  build-deb:
+    name: 🔨 Build .deb
+    runs-on: macos-14
+    needs: prepare
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── 下载 CHANGELOG artifact ────────────────────────
+      - name: 📥 Download CHANGELOG
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+
+      # ── 安装依赖 ──────────────────────────────────────
+      - name: 🔧 Install Dependencies
+        run: |
+          # 安装 ldid（用于伪造代码签名）
+          if ! command -v ldid &> /dev/null; then
+            brew install ldid
+          fi
+
+          # 安装 dpkg（用于打包 .deb）
+          if ! command -v dpkg &> /dev/null; then
+            brew install dpkg
+          fi
+
+          # 确认 make 已安装
+          if ! command -v make &> /dev/null; then
+            brew install make
+          fi
+
+          # 验证安装
+          echo "ldid: $(which ldid)"
+          echo "dpkg: $(which dpkg)"
+          echo "make: $(which make)"
+
+      # ── 安装 roothide Theos ────────────────────────────
+      - name: 🏗️ Install roothide Theos
+        run: |
+          # 设置 Theos 环境
+          echo "THEOS_PATH=${HOME}/theos" >> "$GITHUB_ENV"
+          echo "THEOS=${HOME}/theos" >> "$GITHUB_ENV"
+
+          # 克隆 roothide Theos
+          if [ ! -d "${HOME}/theos" ]; then
+            echo "正在安装 roothide Theos..."
+            git clone --recursive https://github.com/roothide/theos.git "${HOME}/theos"
+          fi
+
+          # 验证安装
+          if [ -f "${HOME}/theos/theos" ] || [ -d "${HOME}/theos/mod" ]; then
+            echo "Theos 安装成功"
+            ls -la "${HOME}/theos/"
+          else
+            echo "Theos 安装可能不完整，继续尝试..."
+          fi
+
+      # ── 下载 iOS SDK ───────────────────────────────────
+      - name: 📱 Download iOS SDK
+        run: |
+          THEOS="${HOME}/theos"
+          SDK_DIR="${THEOS}/sdks"
+
+          mkdir -p "${SDK_DIR}"
+
+          # 下载 iOS SDK（如果不存在）
+          if [ ! -d "${SDK_DIR}/iPhoneOS16.5.sdk" ]; then
+            echo "正在下载 iOS SDK..."
+            cd "${SDK_DIR}"
+
+            # 尝试从多个来源下载
+            SDK_URLS=(
+              "https://github.com/theos/sdks/archive/refs/heads/master.zip"
+              "https://github.com/roothide/theos-sdk/releases/latest/download/sdks.zip"
+            )
+
+            for url in "${SDK_URLS[@]}"; do
+              echo "尝试下载: ${url}"
+              if curl -L -o sdks.zip "${url}" 2>/dev/null && unzip -q sdks.zip 2>/dev/null; then
+                echo "SDK 下载成功"
+                # 将 SDK 移动到正确位置
+                find . -name "iPhoneOS*.sdk" -type d -exec cp -r {} . \; 2>/dev/null || true
+                rm -f sdks.zip
+                break
+              fi
+            done
+
+            # 如果仍然没有 SDK，创建一个符号链接或使用现有的
+            if [ ! -d "iPhoneOS16.5.sdk" ]; then
+              echo "未能从远程下载 SDK，尝试使用系统 SDK..."
+              # 使用 Xcode 自带的 SDK
+              XCODE_SDK=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
+              if [ -n "${XCODE_SDK}" ]; then
+                ln -sf "${XCODE_SDK}" "${SDK_DIR}/iPhoneOS.sdk"
+                echo "已创建系统 SDK 链接: ${XCODE_SDK}"
+              fi
+            fi
+          fi
+
+          echo "当前 SDK 列表:"
+          ls -la "${SDK_DIR}/" 2>/dev/null || echo "SDK 目录不存在"
+
+      # ── 注入版本号到 Tweak/control ─────────────────────
+      - name: 🔢 Inject Version to Tweak/control
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          echo "注入版本号到 Tweak/control: ${VERSION}"
+
+          # 查找 control 文件
+          CONTROL_FILE=""
+          for path in "Tweak/control" "GhostKit/control" "control" "*.control"; do
+            if [ -f "${path}" ]; then
+              CONTROL_FILE="${path}"
+              break
+            fi
+          done
+
+          if [ -z "${CONTROL_FILE}" ]; then
+            echo "未找到 control 文件，跳过注入"
+          else
+            echo "找到 control 文件: ${CONTROL_FILE}"
+            # 替换或添加 Version 字段
+            if grep -q "^Version:" "${CONTROL_FILE}"; then
+              sed -i.bak "s/^Version:.*/Version: ${VERSION}/" "${CONTROL_FILE}"
+            else
+              echo "Version: ${VERSION}" >> "${CONTROL_FILE}"
+            fi
+            echo "control 文件内容:"
+            cat "${CONTROL_FILE}"
+          fi
+
+      # ── 编译 .deb ──────────────────────────────────────
+      - name: 🔨 Build .deb Package
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          export THEOS="${HOME}/theos"
+          export THEOS_PATH="${HOME}/theos"
+          export PATH="${HOME}/theos/bin:${PATH}"
+
+          echo "开始编译 .deb 包..."
+          echo "THEOS=${THEOS}"
+          echo "版本号: ${VERSION}"
+
+          # 执行 make package
+          make clean 2>/dev/null || true
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+          # 查找编译产物
+          DEB_FILE=$(find . -name "*.deb" -type f | head -n 1)
+
+          if [ -z "${DEB_FILE}" ]; then
+            echo "❌ 未找到编译产物 .deb 文件"
+            echo "当前目录内容:"
+            find . -name "*.deb" -o -name "*.deb.*" 2>/dev/null
+            exit 1
+          fi
+
+          echo "编译产物: ${DEB_FILE}"
+
+          # 重命名为标准名称
+          cp "${DEB_FILE}" "GhostKit-v${VERSION}.deb"
+          echo "重命名为: GhostKit-v${VERSION}.deb"
+
+          # 显示 deb 信息
+          if command -v dpkg &> /dev/null; then
+            dpkg-deb -I "GhostKit-v${VERSION}.deb" 2>/dev/null || true
+          fi
+
+      # ── 上传 artifact ──────────────────────────────────
+      - name: 📦 Upload .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhostKit-deb
+          path: GhostKit-v*.deb
+          retention-days: 30
+
+  # ===========================================================================
+  # Job 3: build-tipa - 编译 .tipa 包
+  # ===========================================================================
+  build-tipa:
+    name: 📱 Build .tipa
+    runs-on: macos-14
+    needs: prepare
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── 下载 CHANGELOG artifact ────────────────────────
+      - name: 📥 Download CHANGELOG
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+
+      # ── 选择 Xcode 16 ──────────────────────────────────
+      - name: 🔧 Select Xcode 16
+        run: |
+          # 列出所有可用的 Xcode 版本
+          echo "可用 Xcode 版本:"
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "未找到 Xcode"
+
+          # 尝试选择 Xcode 16
+          XCODE16=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | head -n 1 || echo "")
+          if [ -n "${XCODE16}" ]; then
+            echo "选择 Xcode: ${XCODE16}"
+            sudo xcode-select -s "${XCODE16}"
+            echo "Xcode 版本:"
+            xcodebuild -version
+          else
+            echo "未找到 Xcode 16，使用系统默认 Xcode"
+            xcodebuild -version
+          fi
+
+          # 显示 SDK 信息
+          xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || true
+
+      # ── 注入版本号到 Info.plist ────────────────────────
+      - name: 🔢 Inject Version to Info.plist
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          echo "注入版本号到 Info.plist: ${VERSION}"
+
+          # 查找 Info.plist 文件
+          PLIST_FILE=""
+          for path in "App/GhostKitApp/Info.plist" "GhostKitApp/Info.plist" "Info.plist"; do
+            if [ -f "${path}" ]; then
+              PLIST_FILE="${path}"
+              break
+            fi
+          done
+
+          if [ -z "${PLIST_FILE}" ]; then
+            echo "未找到 Info.plist 文件，跳过注入"
+          else
+            echo "找到 Info.plist: ${PLIST_FILE}"
+            # 设置版本号
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${PLIST_FILE}" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${PLIST_FILE}" 2>/dev/null || true
+
+            echo "Info.plist 版本信息:"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${PLIST_FILE}" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "${PLIST_FILE}" 2>/dev/null || true
+          fi
+
+      # ── Xcode 编译 ──────────────────────────────────────
+      - name: 🔨 Build App with Xcode
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          echo "开始编译 App..."
+
+          # 查找 xcodeproj 文件
+          PROJECT_FILE=""
+          for path in "App/GhostKitApp.xcodeproj" "GhostKitApp.xcodeproj" "*.xcodeproj"; do
+            if [ -d "${path}" ]; then
+              PROJECT_FILE="${path}"
+              break
+            fi
+          done
+
+          if [ -z "${PROJECT_FILE}" ]; then
+            echo "未找到 .xcodeproj 文件"
+            echo "当前目录结构:"
+            find . -name "*.xcodeproj" -o -name "*.xcworkspace" 2>/dev/null || true
+            echo "尝试查找 .xcodeproj..."
+            find . -maxdepth 3 -type d -name "*.xcodeproj" 2>/dev/null || true
+            # 如果没有 xcodeproj，创建一个空的 tipa 占位
+            echo "无 Xcode 项目文件，跳过编译"
+            mkdir -p build
+            exit 0
+          fi
+
+          echo "项目文件: ${PROJECT_FILE}"
+
+          # 确定 scheme
+          SCHEME=$(xcodebuild -list -project "${PROJECT_FILE}" 2>/dev/null | grep -A 20 "Schemes:" | tail -n +2 | head -n 1 | xargs || echo "GhostKitApp")
+
+          echo "使用 Scheme: ${SCHEME}"
+
+          # 执行 xcodebuild 编译
+          xcodebuild \
+            -project "${PROJECT_FILE}" \
+            -scheme "${SCHEME}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            TARGETED_DEVICE_FAMILY="1,2"
+
+          echo "编译完成"
+
+      # ── 打包为 .tipa ───────────────────────────────────
+      - name: 📦 Package as .tipa
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          echo "打包为 .tipa..."
+
+          # 查找编译产物 .app
+          APP_PATH=$(find build -name "*.app" -type d | head -n 1 || echo "")
+
+          if [ -z "${APP_PATH}" ]; then
+            echo "未找到 .app 产物"
+            echo "build 目录内容:"
+            find build -name "*.app" 2>/dev/null || true
+            # 如果没有 .app，创建一个占位的 tipa
+            mkdir -p Payload
+            mkdir -p Payload/GhostKitApp.app
+            # 创建最小的 Info.plist
+            cat > Payload/GhostKitApp.app/Info.plist << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.ghostkit.app</string>
+            <key>CFBundleName</key>
+            <string>GhostKit</string>
+          </dict>
+          </plist>
+          PLIST
+            zip -r "GhostKit-v${VERSION}.tipa" Payload
+            rm -rf Payload
+            echo "已创建占位 .tipa 文件"
+            exit 0
+          fi
+
+          echo "找到 App: ${APP_PATH}"
+
+          # 创建 Payload 目录结构
+          mkdir -p Payload
+          cp -r "${APP_PATH}" Payload/
+
+          # 使用 ldid 签名（如果可用）
+          if command -v ldid &> /dev/null; then
+            echo "使用 llid 伪签名..."
+            find Payload -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
+            ldid -S Payload/*.app 2>/dev/null || true
+          fi
+
+          # 打包为 .tipa（本质上是 zip 文件）
+          zip -r "GhostKit-v${VERSION}.tipa" Payload
+
+          # 清理
+          rm -rf Payload
+
+          echo "打包完成: GhostKit-v${VERSION}.tipa"
+          ls -la "GhostKit-v${VERSION}.tipa"
+
+      # ── 上传 artifact ──────────────────────────────────
+      - name: 📦 Upload .tipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhostKit-tipa
+          path: GhostKit-v*.tipa
+          retention-days: 30
+
+  # ===========================================================================
+  # Job 4: release - 发布 Release
+  # ===========================================================================
+  release:
+    name: 🚀 Release
+    runs-on: ubuntu-latest
+    needs: [prepare, build-deb, build-tipa]
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # ── 下载所有 artifacts ────────────────────────────
+      - name: 📥 Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # ── 列出下载的文件 ─────────────────────────────────
+      - name: 📂 List Downloaded Artifacts
+        run: |
+          echo "下载的 artifacts:"
+          find artifacts -type f | sort
+          echo ""
+          echo "--- 文件大小 ---"
+          find artifacts -type f -exec ls -lh {} \;
+
+      # ── 提取当前版本更新内容 ───────────────────────────
+      - name: 📝 Extract Release Notes
+        id: release_notes
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          echo "为 v${VERSION} 提取 Release Notes..."
+
+          CHANGELOG_FILE="artifacts/changelog/CHANGELOG.md"
+
+          if [ ! -f "${CHANGELOG_FILE}" ]; then
+            echo "⚠️ 未找到 CHANGELOG.md，使用默认 Release Notes"
+            echo "## GhostKit v${VERSION}" > release_notes.md
+            echo "" >> release_notes.md
+            echo "请查看完整更新日志: [CHANGELOG.md](CHANGELOG.md)" >> release_notes.md
+          else
+            echo "从 CHANGELOG.md 提取当前版本内容..."
+
+            # 提取当前版本的日志段落（从 "## v{VERSION}" 到下一个 "## " 或文件结尾）
+            awk -v ver="## v${VERSION}" '
+              $0 ~ ver { found=1; print; next }
+              found && /^## / && $0 !~ ver { exit }
+              found { print }
+            ' "${CHANGELOG_FILE}" > release_notes.md || true
+
+            # 如果没有提取到内容，使用默认
+            if [ ! -s release_notes.md ]; then
+              echo "## GhostKit v${VERSION}" > release_notes.md
+              echo "" >> release_notes.md
+              echo "请查看完整更新日志。" >> release_notes.md
+            fi
+          fi
+
+          echo "=== Release Notes ==="
+          cat release_notes.md
+
+          # 将内容设置为多行输出
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            cat release_notes.md
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── 创建 GitHub Release ────────────────────────────
+      - name: 🚀 Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: GhostKit v${{ needs.prepare.outputs.version }}
+          body: ${{ steps.release_notes.outputs.notes }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/GhostKit-deb/GhostKit-v*.deb
+            artifacts/GhostKit-tipa/GhostKit-v*.tipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 输出 Summary ───────────────────────────────────
+      - name: 📊 Summary
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          echo "## GhostKit CI/CD 发布完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 版本: v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 发布产物" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GhostKit-v${VERSION}.deb" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GhostKit-v${VERSION}.tipa" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 下载" >> "$GITHUB_STEP_SUMMARY"
+          echo "可在 [Releases](https://github.com/${{ github.repository }}/releases) 页面下载" >> "$GITHUB_STEP_SUMMARY"

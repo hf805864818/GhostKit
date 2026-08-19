@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Disable the iOS sandbox so the app can reach the whole filesystem -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+
+    <!-- Run without a per-app container (data is written to real paths) -->
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+
+    <!-- Read the list of installed applications via MobileCoreServices -->
+    <key>com.apple.lsd.applicationlisting</key>
+    <true/>
+
+    <!-- Full access to every keychain group (including apple) -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>apple</string>
+        <string>*</string>
+    </array>
+
+    <!-- TCC: grant Full Disk Access and act as the TCC manager -->
+    <key>com.apple.private.tcc.allow</key>
+    <array>
+        <string>kTCCServiceSystemPolicyAllFiles</string>
+    </array>
+    <key>com.apple.private.tcc.manager</key>
+    <true/>
+
+    <!-- Mark as a platform application (entitled system process) -->
+    <key>platform-application</key>
+    <true/>
+
+    <!-- Read/write access to the entire filesystem absolute path -->
+    <key>com.apple.security.exception.files.absolute-path.read-write</key>
+    <string>/</string>
+
+    <!-- Launch other applications through SpringBoard -->
+    <key>com.apple.springboard.launchapplications</key>
+    <true/>
+
+    <!-- Access all Apple ID accounts stored on the device -->
+    <key>com.apple.private.accounts.allaccounts</key>
+    <true/>
+
+    <!-- Mobile installation SPIs: install / uninstall apps -->
+    <key>com.apple.private.mobileinstall.allowedSPI</key>
+    <array>
+        <string>Install</string>
+        <string>Uninstall</string>
+        <string>UninstallForLaunchServices</string>
+    </array>
+
+    <!-- Allow unsigned executable memory (required by some native helpers) -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Allow debugging of other processes -->
+    <key>com.apple.security.cs.debugger</key>
+    <true/>
+
+    <!-- Run unsigned code (TrollStore helper) -->
+    <key>com.apple.private.cs.debugger.skills</key>
+    <true/>
+</dict>
+</plist>

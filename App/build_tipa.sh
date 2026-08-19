@@ -1,0 +1,100 @@
+#!/bin/bash
+###############################################################################
+# build_tipa.sh - Build & package GhostKit as a TrollStore .tipa
+#
+# Usage:
+#   VERSION=1.0.0 ./build_tipa.sh
+#
+# Requirements:
+#   - Xcode command line tools (xcodebuild, PlistBuddy, zip)
+#   - A valid GhostKit.xcodeproj alongside this script
+###############################################################################
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+VERSION="${VERSION:-1.0.0}"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCHEME="GhostKit"
+CONFIGURATION="Release"
+BUILD_DIR="${PROJECT_DIR}/build"
+PAYLOAD_DIR="${BUILD_DIR}/Payload"
+TIPA_PATH="${BUILD_DIR}/GhostKit_${VERSION}.tipa"
+INFO_PLIST="${PROJECT_DIR}/GhostKitApp/Info.plist"
+
+echo "==> GhostKit TIPA build"
+echo "    Version : ${VERSION}"
+echo "    Project : ${PROJECT_DIR}"
+
+# ---------------------------------------------------------------------------
+# Step 1 - Update Info.plist version number
+# ---------------------------------------------------------------------------
+if [ -f "${INFO_PLIST}" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${INFO_PLIST}" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${INFO_PLIST}" 2>/dev/null || true
+    echo "==> Updated Info.plist -> CFBundleShortVersionString=${VERSION}"
+else
+    echo "Warning: Info.plist not found at ${INFO_PLIST}, skipping version update"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2 - Clean previous build artefacts
+# ---------------------------------------------------------------------------
+rm -rf "${BUILD_DIR}"
+mkdir -p "${BUILD_DIR}"
+
+# ---------------------------------------------------------------------------
+# Step 3 - Compile with xcodebuild (no code signing, TrollStore injects entitlements)
+# ---------------------------------------------------------------------------
+echo "==> Compiling with xcodebuild ..."
+
+xcodebuild \
+    -project "${PROJECT_DIR}/GhostKit.xcodeproj" \
+    -scheme "${SCHEME}" \
+    -configuration "${CONFIGURATION}" \
+    -sdk iphoneos \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_IDENTITY="" \
+    DEVELOPMENT_TEAM="" \
+    CODE_SIGN_ENTITLEMENTS="" \
+    CONFIGURATION_BUILD_DIR="${BUILD_DIR}" \
+    clean build \
+    2>&1 | tee "${BUILD_DIR}/build.log"
+
+# ---------------------------------------------------------------------------
+# Step 4 - Locate the .app bundle
+# ---------------------------------------------------------------------------
+APP_BUNDLE="$(find "${BUILD_DIR}" -name "GhostKit.app" -type d | head -n 1)"
+if [ -z "${APP_BUNDLE}" ]; then
+    echo "Error: GhostKit.app bundle not found after build"
+    exit 1
+fi
+echo "==> Found bundle: ${APP_BUNDLE}"
+
+# ---------------------------------------------------------------------------
+# Step 5 - Copy RootHelper binary into the bundle (if compiled separately)
+# ---------------------------------------------------------------------------
+ROOTHELPER_BIN="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper"
+if [ -f "${ROOTHELPER_BIN}" ]; then
+    cp "${ROOTHELPER_BIN}" "${APP_BUNDLE}/RootHelper"
+    chmod 0755 "${APP_BUNDLE}/RootHelper"
+    echo "==> Bundled RootHelper binary"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 6 - Create Payload directory & package as .tipa (zip)
+# ---------------------------------------------------------------------------
+rm -rf "${PAYLOAD_DIR}"
+mkdir -p "${PAYLOAD_DIR}"
+cp -R "${APP_BUNDLE}" "${PAYLOAD_DIR}/"
+
+echo "==> Packaging ${TIPA_PATH}"
+cd "${BUILD_DIR}"
+rm -f "${TIPA_PATH}"
+zip -rq "${TIPA_PATH}" Payload/
+
+echo "==> Done"
+echo "    Output: ${TIPA_PATH}"

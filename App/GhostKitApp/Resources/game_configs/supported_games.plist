@@ -1,0 +1,459 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>supported_games</key>
+    <array>
+        <!-- ========== Tencent Games ========== -->
+        <dict>
+            <key>bundle_id</key>
+            <string>com.tencent.tmgp.pubgmhd</string>
+            <key>name</key>
+            <string>和平精英</string>
+            <key>name_en</key>
+            <string>PUBG Mobile</string>
+            <key>developer</key>
+            <string>Tencent Games</string>
+            <key>config_prefix</key>
+            <string>pubgm</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.tencent.smoba</string>
+            <key>name</key>
+            <string>王者荣耀</string>
+            <key>name_en</key>
+            <string>Honor of Kings</string>
+            <key>developer</key>
+            <string>Tencent Games</string>
+            <key>config_prefix</key>
+            <string>smoba</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.tencent.tmgp.sgame</string>
+            <key>name</key>
+            <string>王者荣耀(国际版)</string>
+            <key>name_en</key>
+            <string>Honor of Kings (Global)</string>
+            <key>developer</key>
+            <string>Tencent Games</string>
+            <key>config_prefix</key>
+            <string>sgame</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.tencent.tmgp.cfhd</string>
+            <key>name</key>
+            <string>穿越火线手游</string>
+            <key>name_en</key>
+            <string>CrossFire HD</string>
+            <key>developer</key>
+            <string>Tencent Games</string>
+            <key>config_prefix</key>
+            <string>cfhd</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.tencent.tmgp.qqpao</string>
+            <key>name</key>
+            <string>QQ飞车手游</string>
+            <key>name_en</key>
+            <string>QQ Speed Mobile</string>
+            <key>developer</key>
+            <string>Tencent Games</string>
+            <key>config_prefix</key>
+            <string>qqpao</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.tencent.tmgp.cod</string>
+            <key>name</key>
+            <string>使命召唤手游</string>
+            <key>name_en</key>
+            <string>Call of Duty Mobile</string>
+            <key>developer</key>
+            <string>Tencent Games</string>
+            <key>config_prefix</key>
+            <string>cod</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <!-- ========== NetEase Games ========== -->
+        <dict>
+            <key>bundle_id</key>
+            <string>com.netease.h55hd</string>
+            <key>name</key>
+            <string>荒野行动</string>
+            <key>name_en</key>
+            <string>Knives Out</string>
+            <key>developer</key>
+            <string>NetEase Games</string>
+            <key>config_prefix</key>
+            <string>knivesout</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.netease.mrzh</string>
+            <key>name</key>
+            <string>明日之后</string>
+            <key>name_en</key>
+            <string>LifeAfter</string>
+            <key>developer</key>
+            <string>NetEase Games</string>
+            <key>config_prefix</key>
+            <string>lifeafter</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.netease.dt21no</string>
+            <key>name</key>
+            <string>第五人格</string>
+            <key>name_en</key>
+            <string>Identity V</string>
+            <key>developer</key>
+            <string>NetEase Games</string>
+            <key>config_prefix</key>
+            <string>identityv</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.netease.hyhd</string>
+            <key>name</key>
+            <string>阴阳师</string>
+            <key>name_en</key>
+            <string>Onmyoji</string>
+            <key>developer</key>
+            <string>NetEase Games</string>
+            <key>config_prefix</key>
+            <string>onmyoji</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <!-- ========== miHoYo Games ========== -->
+        <dict>
+            <key>bundle_id</key>
+            <string>com.miHoYo.GenshinImpact</string>
+            <key>name</key>
+            <string>原神</string>
+            <key>name_en</key>
+            <string>Genshin Impact</string>
+            <key>developer</key>
+            <string>miHoYo</string>
+            <key>config_prefix</key>
+            <string>genshin</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.miHoYo.HYuSky</string>
+            <key>name</key>
+            <string>崩坏：星穹铁道</string>
+            <key>name_en</key>
+            <string>Honkai: Star Rail</string>
+            <key>developer</key>
+            <string>miHoYo</string>
+            <key>config_prefix</key>
+            <string>starrail</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.miHoYo.bh3.bilibili</string>
+            <key>name</key>
+            <string>崩坏3</string>
+            <key>name_en</key>
+            <string>Honkai Impact 3rd</string>
+            <key>developer</key>
+            <string>miHoYo</string>
+            <key>config_prefix</key>
+            <string>honkai3</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.miHoYo.zzz</string>
+            <key>name</key>
+            <string>绝区零</string>
+            <key>name_en</key>
+            <string>Zenless Zone Zero</string>
+            <key>developer</key>
+            <string>miHoYo</string>
+            <key>config_prefix</key>
+            <string>zzz</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <!-- ========== Other Games ========== -->
+        <dict>
+            <key>bundle_id</key>
+            <string>com.dts.freefireth</string>
+            <key>name</key>
+            <string>Free Fire</string>
+            <key>name_en</key>
+            <string>Free Fire</string>
+            <key>developer</key>
+            <string>Garena</string>
+            <key>config_prefix</key>
+            <string>freefire</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.dts.freefiremax</string>
+            <key>name</key>
+            <string>Free Fire MAX</string>
+            <key>name_en</key>
+            <string>Free Fire MAX</string>
+            <key>developer</key>
+            <string>Garena</string>
+            <key>config_prefix</key>
+            <string>freefiremax</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.ea.gp.fifamobile</string>
+            <key>name</key>
+            <string>FIFA Mobile</string>
+            <key>name_en</key>
+            <string>FIFA Mobile</string>
+            <key>developer</key>
+            <string>EA Sports</string>
+            <key>config_prefix</key>
+            <string>fifa</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.garena.game.codm</string>
+            <key>name</key>
+            <string>Call of Duty Mobile (SEA)</string>
+            <key>name_en</key>
+            <string>Call of Duty Mobile (SEA)</string>
+            <key>developer</key>
+            <string>Garena</string>
+            <key>config_prefix</key>
+            <string>codm</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.riotgames.league.wildrift</string>
+            <key>name</key>
+            <string>英雄联盟手游</string>
+            <key>name_en</key>
+            <string>League of Legends: Wild Rift</string>
+            <key>developer</key>
+            <string>Riot Games</string>
+            <key>config_prefix</key>
+            <string>wildrift</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.supercell.clashroyale</string>
+            <key>name</key>
+            <string>皇室战争</string>
+            <key>name_en</key>
+            <string>Clash Royale</string>
+            <key>developer</key>
+            <string>Supercell</string>
+            <key>config_prefix</key>
+            <string>clashroyale</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.supercell.brawlstars</string>
+            <key>name</key>
+            <string>荒野乱斗</string>
+            <key>name_en</key>
+            <string>Brawl Stars</string>
+            <key>developer</key>
+            <string>Supercell</string>
+            <key>config_prefix</key>
+            <string>brawlstars</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.krafton.ingress</string>
+            <key>name</key>
+            <string>PUBG Mobile (KR)</string>
+            <key>name_en</key>
+            <string>PUBG Mobile (KR)</string>
+            <key>developer</key>
+            <string>Krafton</string>
+            <key>config_prefix</key>
+            <string>pubgmkr</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+        <dict>
+            <key>bundle_id</key>
+            <string>com.tencent.ig</string>
+            <key>name</key>
+            <string>PUBG Mobile (Global)</string>
+            <key>name_en</key>
+            <string>PUBG Mobile (Global)</string>
+            <key>developer</key>
+            <string>Tencent Games</string>
+            <key>config_prefix</key>
+            <string>pubgmglobal</string>
+            <key>supported_qualities</key>
+            <array>
+                <string>smooth</string>
+                <string>balance</string>
+                <string>extreme</string>
+            </array>
+        </dict>
+    </array>
+    <key>quality_levels</key>
+    <dict>
+        <key>smooth</key>
+        <dict>
+            <key>name</key>
+            <string>流畅</string>
+            <key>name_en</key>
+            <string>Smooth</string>
+            <key>description</key>
+            <string>低画质以提升帧率，适合性能较低设备</string>
+        </dict>
+        <key>balance</key>
+        <dict>
+            <key>name</key>
+            <string>平衡</string>
+            <key>name_en</key>
+            <string>Balanced</string>
+            <key>description</key>
+            <string>画质与性能平衡，适合大多数设备</string>
+        </dict>
+        <key>extreme</key>
+        <dict>
+            <key>name</key>
+            <string>极致</string>
+            <key>name_en</key>
+            <string>Extreme</string>
+            <key>description</key>
+            <string>最高画质体验，需要高性能设备</string>
+        </dict>
+    </dict>
+    <key>version</key>
+    <string>1.0.0</string>
+</dict>
+</plist>
