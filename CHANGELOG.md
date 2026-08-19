@@ -2,6 +2,17 @@
 
 所有显著变更都会记录在此文件中。
 
+## v1.0.14 - 2026-08-19
+
+### ✨ 新功能
+- error messages now show as Alert dialog (stays until dismissed)
+
+### 🐛 问题修复
+- (无)
+
+### 📦 其他变更
+- [0;32m[INFO][0m 获取提交记录范围: v1.0.13..HEAD
+
 ## v1.0.13 - 2026-08-19
 
 ### ✨ 新功能
