@@ -2,6 +2,18 @@
 
 所有显著变更都会记录在此文件中。
 
+## v1.0.2 - 2026-08-19
+
+### ✨ 新功能
+- (无)
+
+### 🐛 问题修复
+- CacheCleaner unused variable, deb fallback to placeholder
+
+### 📦 其他变更
+- [0;32m[INFO][0m 获取提交记录范围: v1.0.2..HEAD
+- chore(release): v1.0.1 [skip ci]
+
 ## v1.0.1 - 2026-08-19
 
 ### ✨ 新功能
