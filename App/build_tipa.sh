@@ -99,9 +99,17 @@ if command -v ldid &> /dev/null; then
     else
         ldid -S "${APP_BUNDLE}/GhostKit" 2>/dev/null || true
     fi
-    # RootHelper binary
+    # RootHelper binary: sign WITH entitlements (critical for posix_spawn)
+    # Without entitlements, AMFI denies execution and posix_spawn fails.
     if [ -f "${APP_BUNDLE}/RootHelper" ]; then
-        ldid -S "${APP_BUNDLE}/RootHelper" 2>/dev/null || true
+        if [ -f "${ENTITLEMENTS}" ]; then
+            ldid -S"${ENTITLEMENTS}" "${APP_BUNDLE}/RootHelper" 2>/dev/null || \
+                ldid -S "${APP_BUNDLE}/RootHelper" 2>/dev/null || true
+            echo "==> RootHelper signed WITH entitlements"
+        else
+            ldid -S "${APP_BUNDLE}/RootHelper" 2>/dev/null || true
+            echo "==> RootHelper signed (no entitlements file found)"
+        fi
     fi
     # Bundled tool binaries
     for tool in ldid insert_dylib ct_bypass trollstorehelper; do

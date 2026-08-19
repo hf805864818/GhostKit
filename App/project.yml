@@ -101,10 +101,18 @@ targets:
           echo " RootHelper binary built at: ${ROOTHELPER_OUT}"
 
           # Fakesign all binaries with ldid (needed for TrollStore)
+          # RootHelper MUST be signed WITH entitlements, otherwise
+          # AMFI denies posix_spawn execution.
+          ENT_FILE="${SRCROOT}/GhostKitApp/Entitlements/GhostKit.entitlements"
           if command -v ldid &> /dev/null; then
               echo " Fakesigning binaries with ldid..."
-              ldid -S "${ROOTHELPER_OUT}"
-              echo "   RootHelper fakesigned"
+              if [ -f "${ENT_FILE}" ]; then
+                  ldid -S"${ENT_FILE}" "${ROOTHELPER_OUT}"
+                  echo "   RootHelper signed WITH entitlements"
+              else
+                  ldid -S "${ROOTHELPER_OUT}"
+                  echo "   RootHelper fakesigned (no entitlements file)"
+              fi
               # Fakesign tool binaries in the bundle
               for tool in ldid insert_dylib ct_bypass trollstorehelper; do
                   TOOL_PATH="${APP_BUNDLE}/${tool}"

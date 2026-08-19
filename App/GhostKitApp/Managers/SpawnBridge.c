@@ -8,14 +8,48 @@
 //
 
 #include "SpawnBridge.h"
+#include <errno.h>
+#include <sys/stat.h>
 
 int spawn_and_capture(const char *path,
                        char *const argv[],
                        char *output,
                        int out_size)
 {
+    /* Clear output buffer */
+    if (output && out_size > 0) {
+        output[0] = '\0';
+    }
+
+    /* Verify the binary exists and is executable */
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        if (output && out_size > 0) {
+            snprintf(output, out_size, "Binary not found: %s (errno=%d: %s)",
+                     path, errno, strerror(errno));
+        }
+        return -1;
+    }
+
+    if (!S_ISREG(st.st_mode)) {
+        if (output && out_size > 0) {
+            snprintf(output, out_size, "Not a regular file: %s", path);
+        }
+        return -1;
+    }
+
+    /* Check execute permission */
+    if (!(st.st_mode & S_IXUSR)) {
+        /* Try to fix permissions */
+        chmod(path, st.st_mode | 0755);
+    }
+
     int pipefd[2];
     if (pipe(pipefd) != 0) {
+        if (output && out_size > 0) {
+            snprintf(output, out_size, "pipe() failed: errno=%d: %s",
+                     errno, strerror(errno));
+        }
         return -1;
     }
 
@@ -35,7 +69,26 @@ int spawn_and_capture(const char *path,
     if (rc != 0) {
         close(pipefd[0]);
         close(pipefd[1]);
-        return -1;
+        /* Return the actual errno as a negative number for diagnosis.
+         * Common codes:
+         *   -2  = ENOENT (file not found)
+         *   -13 = EACCES (permission denied)
+         *   -22 = EINVAL (invalid argument)
+         *   -86 = EBADARCH (wrong architecture)
+         *   -88 = ENOEXEC (not executable / bad magic)
+         * We encode it as -(errno) to distinguish from exit codes.
+         * But also write a human-readable message to output. */
+        if (output && out_size > 0) {
+            snprintf(output, out_size,
+                     "posix_spawn('%s') failed: errno=%d (%s). "
+                     "File mode=0%o size=%lld. "
+                     "The binary may not be properly code-signed. "
+                     "TrollStore requires ldid -S<entitlements> on all "
+                     "executables in the bundle.",
+                     path, rc, strerror(rc),
+                     (unsigned)st.st_mode, (long long)st.st_size);
+        }
+        return -(rc);  /* Negative errno for diagnosis */
     }
 
     close(pipefd[1]);
@@ -59,7 +112,31 @@ int spawn_and_capture(const char *path,
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
     }
-    return -2;
+    if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+        if (output && out_size > 0) {
+            /* Append signal info after any captured output */
+            int remaining = out_size - total - 1;
+            if (remaining > 0) {
+                if (total > 0) {
+                    output[total++] = '\n';
+                    remaining--;
+                }
+                snprintf(output + total, remaining,
+                         "[RootHelper killed by signal %d (%s)]",
+                         sig, strsignal(sig));
+            }
+        }
+        return -256 - sig;
+    }
+    if (output && out_size > 0) {
+        int remaining = out_size - total - 1;
+        if (remaining > 0) {
+            snprintf(output + total, remaining,
+                     "[RootHelper terminated abnormally (status=0x%x)]", status);
+        }
+    }
+    return -300;
 }
 
 int spawn_simple(const char *path,

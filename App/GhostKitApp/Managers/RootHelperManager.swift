@@ -24,8 +24,15 @@ final class RootHelperManager: ObservableObject {
     static let shared = RootHelperManager()
 
     /// Path to the bundled RootHelper binary inside the .app bundle.
-    private var helperPath: String {
+    private var bundledHelperPath: String {
         (Bundle.main.bundlePath as NSString).appendingPathComponent("RootHelper")
+    }
+
+    /// Path where RootHelper is copied for execution.
+    /// iOS may block execution of binaries from inside the app bundle.
+    /// Copying to /tmp/ and executing from there is more reliable.
+    private var executableHelperPath: String {
+        "/tmp/GhostKitRootHelper"
     }
 
     private init() {}
@@ -107,14 +114,14 @@ final class RootHelperManager: ObservableObject {
 
     /// Execute RootHelper via C bridge (posix_spawn wrapper).
     private func executeHelper(arguments: [String]) -> RootHelperResult {
-        let path = self.helperPath
 
-        // Check if RootHelper binary exists
-        guard FileManager.default.fileExists(atPath: path) else {
-            return .failure("RootHelper binary not found at: \(path)")
+        // Step 1: Ensure RootHelper binary is available and executable
+        let execPath = self.prepareHelperBinary()
+        guard let path = execPath else {
+            return .failure("RootHelper binary not found in app bundle at: \(self.bundledHelperPath)")
         }
 
-        // Build argv array as C strings
+        // Step 2: Build argv array as C strings
         let argc = arguments.count + 2  // path + args + NULL
         var argv: [UnsafeMutablePointer<CChar>?] = []
         argv.append(strdup(path))
@@ -129,12 +136,12 @@ final class RootHelperManager: ObservableObject {
             }
         }
 
-        // Allocate output buffer (1 MB should be enough)
+        // Step 3: Allocate output buffer (1 MB)
         let bufferSize = 1_048_576
         let outputBuffer = UnsafeMutablePointer<CChar>.allocate(capacity: bufferSize)
         defer { outputBuffer.deallocate() }
 
-        // Call C bridge function
+        // Step 4: Call C bridge function
         let exitCode = spawn_and_capture(
             path,
             argv,
@@ -147,14 +154,61 @@ final class RootHelperManager: ObservableObject {
 
         if exitCode == 0 {
             return .success(output.isEmpty ? "OK" : output)
-        } else if exitCode == -1 {
-            return .failure("Failed to spawn RootHelper (posix_spawn error)")
-        } else if exitCode == -2 {
-            return .failure("RootHelper terminated abnormally")
+        } else if exitCode < 0 {
+            // Any negative return from SpawnBridge means posix_spawn or
+            // pre-spawn checks failed.  The output buffer contains a
+            // diagnostic message from SpawnBridge.c.
+            let errnoVal = -exitCode
+            let errnoDesc = String(cString: strerror(errnoVal))
+            return .failure(output.isEmpty
+                ? "无法启动 RootHelper (errno=\(errnoVal): \(errnoDesc))"
+                : output)
         } else {
+            // Positive exit code from RootHelper itself
             return .failure(output.isEmpty
                 ? "RootHelper exited with code \(exitCode)"
                 : output)
         }
+    }
+
+    /// Prepare the RootHelper binary for execution.
+    /// Copies it from the app bundle to /tmp/ and ensures it's executable.
+    /// Returns the path to use for execution, or nil if the binary doesn't exist.
+    private func prepareHelperBinary() -> String? {
+        let fm = FileManager.default
+
+        // Check if bundled RootHelper exists
+        guard fm.fileExists(atPath: bundledHelperPath) else {
+            NSLog("[GhostKit] RootHelper not found at: %@", bundledHelperPath)
+            return nil
+        }
+
+        // Copy to /tmp/ for execution (avoids app bundle sandbox restrictions)
+        let tmpPath = executableHelperPath
+        if fm.fileExists(atPath: tmpPath) {
+            // Check if it's the same as the bundled version
+            let bundledAttrs = try? fm.attributesOfItem(atPath: bundledHelperPath)
+            let tmpAttrs = try? fm.attributesOfItem(atPath: tmpPath)
+            let bundledSize = bundledAttrs?[.size] as? Int ?? 0
+            let tmpSize = tmpAttrs?[.size] as? Int ?? 0
+            if bundledSize != tmpSize {
+                try? fm.removeItem(atPath: tmpPath)
+                try? fm.copyItem(atPath: bundledHelperPath, toPath: tmpPath)
+            }
+        } else {
+            do {
+                try fm.copyItem(atPath: bundledHelperPath, toPath: tmpPath)
+                NSLog("[GhostKit] Copied RootHelper to %@", tmpPath)
+            } catch {
+                NSLog("[GhostKit] Failed to copy RootHelper to /tmp/: %@", error.localizedDescription)
+                // Fall back to bundled path
+                return bundledHelperPath
+            }
+        }
+
+        // Ensure executable permissions
+        chmod(tmpPath, 0o755)
+
+        return tmpPath
     }
 }

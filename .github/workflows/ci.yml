@@ -515,8 +515,15 @@ jobs:
             fi
             # Sign dylibs without entitlements
             find Payload -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
-            # RootHelper: fakesign without entitlements
-            find Payload -name "RootHelper" -exec ldid -S {} \; 2>/dev/null || true
+            # RootHelper: sign WITH entitlements (same as main binary)
+            # Without entitlements, AMFI denies posix_spawn execution
+            if [ -f "${ENTITLEMENTS}" ]; then
+              find Payload -name "RootHelper" -type f -exec chmod 755 {} \; -exec ldid -S"${ENTITLEMENTS}" {} \; 2>&1 || \
+                find Payload -name "RootHelper" -type f -exec ldid -S {} \; 2>&1
+              echo "RootHelper signed with entitlements"
+            else
+              find Payload -name "RootHelper" -type f -exec chmod 755 {} \; -exec ldid -S {} \; 2>&1
+            fi
             # Fakesign bundled tool binaries
             for tool in ldid insert_dylib ct_bypass trollstorehelper; do
               find Payload -name "${tool}" -type f -exec chmod 755 {} \; -exec ldid -S {} \; 2>/dev/null || true
