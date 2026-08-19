@@ -495,13 +495,25 @@ jobs:
           if command -v ldid &> /dev/null; then
             echo "使用 ldid 伪签名（含 entitlements）..."
             ENTITLEMENTS="App/GhostKitApp/Entitlements/GhostKit.entitlements"
+            # Find the .app bundle and its main executable
+            APP_DIR=$(find Payload -name "*.app" -type d | head -n 1)
+            if [ -n "${APP_DIR}" ] && [ -f "${ENTITLEMENTS}" ]; then
+              MAIN_BIN=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "${APP_DIR}/Info.plist" 2>/dev/null || echo "")
+              if [ -n "${MAIN_BIN}" ] && [ -f "${APP_DIR}/${MAIN_BIN}" ]; then
+                echo "Signing main binary: ${APP_DIR}/${MAIN_BIN}"
+                ldid -S"${ENTITLEMENTS}" "${APP_DIR}/${MAIN_BIN}"
+              else
+                echo "WARNING: Could not find main binary, signing app dir"
+                ldid -S"${ENTITLEMENTS}" "${APP_DIR}"
+              fi
+            fi
+            # Sign dylibs without entitlements
             find Payload -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
-            # Main app binary: embed entitlements
-            ldid -S"${ENTITLEMENTS}" Payload/*.app/* 2>/dev/null || \
-              ldid -S Payload/*.app 2>/dev/null || true
             # RootHelper: fakesign without entitlements
             find Payload -name "RootHelper" -exec ldid -S {} \; 2>/dev/null || true
             echo "Entitlements embedded"
+          else
+            echo "WARNING: ldid not found, entitlements will NOT be embedded"
           fi
 
           # 打包为 .tipa

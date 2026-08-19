@@ -132,7 +132,7 @@ struct ContentView: View {
             if let error = appManager.loadError {
                 errorState(message: error)
             } else {
-                emptyState
+                genuinelyEmptyState
             }
         } else if appManager.displayedApps.isEmpty {
             noResultsState
@@ -194,6 +194,24 @@ struct ContentView: View {
                     .foregroundColor(.blue)
                     .clipShape(Capsule())
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom) { iosVersionFooter }
+    }
+
+    // MARK: - Genuinely empty state (loaded but no apps found)
+
+    private var genuinelyEmptyState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "tray")
+                .font(.system(size: 40))
+                .foregroundColor(.secondary)
+            Text("暂无应用")
+                .font(.headline)
+                .foregroundColor(.secondary)
+            Text("下拉刷新或检查权限设置")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .bottom) { iosVersionFooter }
