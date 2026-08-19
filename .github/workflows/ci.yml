@@ -511,7 +511,11 @@ jobs:
             find Payload -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
             # RootHelper: fakesign without entitlements
             find Payload -name "RootHelper" -exec ldid -S {} \; 2>/dev/null || true
-            echo "Entitlements embedded"
+            # Fakesign bundled tool binaries
+            for tool in ldid insert_dylib ct_bypass trollstorehelper; do
+              find Payload -name "${tool}" -type f -exec chmod 755 {} \; -exec ldid -S {} \; 2>/dev/null || true
+            done
+            echo "Entitlements embedded, tools fakesigned"
           else
             echo "WARNING: ldid not found, entitlements will NOT be embedded"
           fi

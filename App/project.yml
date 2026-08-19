@@ -44,6 +44,7 @@ targets:
       - GhostKitApp/zh-Hans.lproj
       - GhostKitApp/zh-HK.lproj
       - GhostKitApp/Resources
+      - GhostKitApp/Tools
     info:
       path: GhostKitApp/Info.plist
       properties:
@@ -99,8 +100,27 @@ targets:
           chmod 755 "${ROOTHELPER_OUT}"
           echo " RootHelper binary built at: ${ROOTHELPER_OUT}"
 
-          # Fakesign with ldid if available (needed for TrollStore)
+          # Fakesign all binaries with ldid (needed for TrollStore)
           if command -v ldid &> /dev/null; then
+              echo " Fakesigning binaries with ldid..."
               ldid -S "${ROOTHELPER_OUT}"
-              echo " RootHelper fakesigned with ldid"
+              echo "   RootHelper fakesigned"
+              # Fakesign tool binaries in the bundle
+              for tool in ldid insert_dylib ct_bypass trollstorehelper; do
+                  TOOL_PATH="${APP_BUNDLE}/${tool}"
+                  if [ -f "${TOOL_PATH}" ]; then
+                      chmod 755 "${TOOL_PATH}"
+                      ldid -S "${TOOL_PATH}"
+                      echo "   ${tool} fakesigned"
+                  fi
+              done
+              # Fakesign dylibs
+              for dylib in libiosexec.1.dylib libcrypto.3.dylib; do
+                  DYLIB_PATH="${APP_BUNDLE}/${dylib}"
+                  if [ -f "${DYLIB_PATH}" ]; then
+                      chmod 755 "${DYLIB_PATH}"
+                      ldid -S "${DYLIB_PATH}"
+                      echo "   ${dylib} fakesigned"
+                  fi
+              done
           fi

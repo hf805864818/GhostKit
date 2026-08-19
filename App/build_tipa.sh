@@ -87,20 +87,43 @@ fi
 # ---------------------------------------------------------------------------
 # Step 5b - Fakesign binaries with entitlements via ldid
 #           TrollStore reads embedded entitlements from the code signature.
+#           Also fakesign bundled tool binaries (ldid, insert_dylib, etc.)
 # ---------------------------------------------------------------------------
 ENTITLEMENTS="${PROJECT_DIR}/GhostKitApp/Entitlements/GhostKit.entitlements"
 if command -v ldid &> /dev/null; then
     echo "==> Fakesigning with entitlements via ldid"
-    # Main app binary
-    ldid -S"${ENTITLEMENTS}" "${APP_BUNDLE}/GhostKit" 2>/dev/null || \
-        echo "Warning: ldid failed for main binary, continuing without entitlements"
+    # Main app binary: embed entitlements
+    if [ -f "${ENTITLEMENTS}" ]; then
+        ldid -S"${ENTITLEMENTS}" "${APP_BUNDLE}/GhostKit" 2>/dev/null || \
+            echo "Warning: ldid failed for main binary, continuing without entitlements"
+    else
+        ldid -S "${APP_BUNDLE}/GhostKit" 2>/dev/null || true
+    fi
     # RootHelper binary
     if [ -f "${APP_BUNDLE}/RootHelper" ]; then
         ldid -S "${APP_BUNDLE}/RootHelper" 2>/dev/null || true
     fi
-    # Any embedded .dylib
-    find "${APP_BUNDLE}" -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
-    echo "==> Entitlements embedded"
+    # Bundled tool binaries
+    for tool in ldid insert_dylib ct_bypass trollstorehelper; do
+        TOOL_PATH="${APP_BUNDLE}/${tool}"
+        if [ -f "${TOOL_PATH}" ]; then
+            chmod 0755 "${TOOL_PATH}"
+            ldid -S "${TOOL_PATH}" 2>/dev/null || true
+            echo "==> Fakesigned tool: ${tool}"
+        fi
+    done
+    # Bundled dylibs
+    for dylib in libiosexec.1.dylib libcrypto.3.dylib; do
+        DYLIB_PATH="${APP_BUNDLE}/${dylib}"
+        if [ -f "${DYLIB_PATH}" ]; then
+            chmod 0755 "${DYLIB_PATH}"
+            ldid -S "${DYLIB_PATH}" 2>/dev/null || true
+            echo "==> Fakesigned dylib: ${dylib}"
+        fi
+    done
+    # Any other embedded .dylib
+    find "${APP_BUNDLE}" -name "*.dylib" ! -name "libiosexec*" ! -name "libcrypto*" -exec ldid -S {} \; 2>/dev/null || true
+    echo "==> Entitlements embedded, tools fakesigned"
 else
     echo "Warning: ldid not found, entitlements will NOT be embedded"
     echo "         This may cause private API failures at runtime"

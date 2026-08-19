@@ -15,27 +15,67 @@
 
 extern char **environ;
 
+/// Get the path to a bundled tool binary.
+/// Tweak injects into the target app process, so tools are not in
+/// our own bundle. We search known TrollStore app paths.
+static NSString *toolPath(NSString *name) {
+    // Try multiple possible GhostKit app bundle locations
+    NSArray *searchPaths = @[
+        @"/var/containers/Bundle/Application",
+        @"/Applications",
+    ];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *searchDir in searchPaths) {
+        NSArray *subdirs = [fm contentsOfDirectoryAtPath:searchDir error:nil];
+        for (NSString *subdir in subdirs) {
+            NSString *appDir = [searchDir stringByAppendingPathComponent:subdir];
+            NSArray *contents = [fm contentsOfDirectoryAtPath:appDir error:nil];
+            for (NSString *item in contents) {
+                if ([item hasSuffix:@".app"]) {
+                    NSString *appPath = [appDir stringByAppendingPathComponent:item];
+                    NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+                    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+                    NSString *bid = info[@"CFBundleIdentifier"];
+                    // Match GhostKit app by bundle ID prefix
+                    if ([bid hasPrefix:@"apple.ghostkit"] || [bid hasPrefix:@"com.ghostkit"]) {
+                        NSString *tool = [appPath stringByAppendingPathComponent:name];
+                        if ([fm fileExistsAtPath:tool]) {
+                            return tool;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: assume tool is in PATH
+    return name;
+}
+
 /// Run a command with arguments via posix_spawnp, returning the exit code.
 /// Replaces system() which is unavailable in the iOS SDK.
+/// Tools are looked up from the GhostKit app bundle first.
 static int runSpawnCommand(NSString *cmd, NSArray<NSString *> *args) {
     if (!cmd || cmd.length == 0) {
         return -1;
     }
 
-    NSUInteger argc = args.count + 2;  // cmd + args + NULL
+    // Resolve tool path from GhostKit app bundle
+    NSString *resolvedPath = toolPath(cmd);
+
+    NSUInteger argc = args.count + 2;  // path + args + NULL
     const char **cArgv = calloc(argc, sizeof(const char *));
     if (!cArgv) {
         return -1;
     }
 
-    cArgv[0] = [cmd UTF8String];
+    cArgv[0] = [resolvedPath UTF8String];
     for (NSUInteger i = 0; i < args.count; i++) {
         cArgv[i + 1] = [args[i] UTF8String];
     }
     cArgv[args.count + 1] = NULL;
 
     pid_t pid = 0;
-    int spawnResult = posix_spawnp(&pid, [cmd UTF8String], NULL, NULL,
+    int spawnResult = posix_spawnp(&pid, [resolvedPath UTF8String], NULL, NULL,
                                    (char *const *)cArgv, environ);
     free(cArgv);
 
