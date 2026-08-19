@@ -94,7 +94,7 @@ final class RootHelperManager: ObservableObject {
         run(arguments: ["apply-config", bundleID, configPath], completion: completion)
     }
 
-    // MARK: - Core execution (posix_spawn)
+    // MARK: - Core execution (popen)
 
     func run(arguments: [String], completion: @escaping (RootHelperResult) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -105,7 +105,7 @@ final class RootHelperManager: ObservableObject {
         }
     }
 
-    /// Spawn RootHelper via posix_spawn, capture stdout/stderr, and return result.
+    /// Execute RootHelper via popen, capture combined stdout+stderr.
     private func executeHelper(arguments: [String]) -> RootHelperResult {
         let path = self.helperPath
 
@@ -114,89 +114,30 @@ final class RootHelperManager: ObservableObject {
             return .failure("RootHelper binary not found at: \(path)")
         }
 
-        // Build argv array (C strings)
-        var argv: [UnsafeMutablePointer<CChar>?] = []
-        argv.append(strdup(path))
-        for arg in arguments {
-            argv.append(strdup(arg))
-        }
-        argv.append(nil)
+        // Build command string with 2>&1 to capture stderr in stdout
+        let escapedArgs = arguments.map { "'\($0)'" }.joined(separator: " ")
+        let command = "'\(path)' \(escapedArgs) 2>&1"
 
-        defer {
-            for ptr in argv {
-                if ptr != nil { free(ptr) }
-            }
+        // Use popen to capture combined output
+        guard let pipe = popen(command, "r") else {
+            return .failure("Failed to open pipe to RootHelper")
         }
 
-        // Create pipes for stdout and stderr
-        var stdoutPipe: [Int32] = [-1, -1]
-        var stderrPipe: [Int32] = [-1, -1]
-        guard pipe(&stdoutPipe) == 0, pipe(&stderrPipe) == 0 else {
-            return .failure("Failed to create pipes")
+        var output = ""
+        var buffer = [CChar](repeating: 0, count: 4096)
+        while fgets(&buffer, Int32(buffer.count), pipe) != nil {
+            output += String(cString: buffer)
         }
 
-        // Set up spawn file actions
-        var fileActions = posix_spawn_file_actions_t()
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_adddup2(&fileActions, stdoutPipe[1], STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, stderrPipe[1], STDERR_FILENO)
-        posix_spawn_file_actions_addclose(&fileActions, stdoutPipe[0])
-        posix_spawn_file_actions_addclose(&fileActions, stderrPipe[0])
-        posix_spawn_file_actions_addclose(&fileActions, stdoutPipe[1])
-        posix_spawn_file_actions_addclose(&fileActions, stderrPipe[1])
-
-        defer {
-            posix_spawn_file_actions_destroy(&fileActions)
-        }
-
-        // Spawn the process
-        var pid: pid_t = 0
-        let spawnResult = posix_spawn(&pid, path, &fileActions, nil, argv, nil)
-
-        // Close write ends of pipes in parent
-        close(stdoutPipe[1])
-        close(stderrPipe[1])
-
-        if spawnResult != 0 {
-            close(stdoutPipe[0])
-            close(stderrPipe[0])
-            return .failure("Failed to spawn RootHelper (errno: \(spawnResult))")
-        }
-
-        // Read stdout
-        let stdoutData = self.readData(from: stdoutPipe[0])
-        close(stdoutPipe[0])
-
-        // Read stderr
-        let stderrData = self.readData(from: stderrPipe[0])
-        close(stderrPipe[0])
-
-        // Wait for exit
-        var status: Int32 = 0
-        waitpid(pid, &status, 0)
-
-        let stdoutStr = String(data: stdoutData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let stderrStr = String(data: stderrData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let status = pclose(pipe)
+        let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if status == 0 {
-            return .success(stdoutStr.isEmpty ? "OK" : stdoutStr)
+            return .success(trimmedOutput.isEmpty ? "OK" : trimmedOutput)
         } else {
-            let msg = stderrStr.isEmpty ? stdoutStr : stderrStr
-            return .failure(msg.isEmpty ? "RootHelper exited with code \(status)" : msg)
+            return .failure(trimmedOutput.isEmpty
+                ? "RootHelper exited with code \(status)"
+                : trimmedOutput)
         }
-    }
-
-    /// Read all data from a file descriptor.
-    private func readData(from fd: Int32) -> Data {
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        var bytesRead = read(fd, &buffer, buffer.count)
-        while bytesRead > 0 {
-            data.append(contentsOf: buffer[0..<bytesRead])
-            bytesRead = read(fd, &buffer, buffer.count)
-        }
-        return data
     }
 }
