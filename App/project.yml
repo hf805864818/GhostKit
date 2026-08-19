@@ -1,0 +1,72 @@
+name: GhostKitApp
+options:
+  bundleIdPrefix: com.ghostkit
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    DEVELOPMENT_TEAM: ""
+    ENABLE_BITCODE: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  GhostKitApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: GhostKitApp
+        excludes:
+          - "RootHelper/RootHelper.c"
+          - "RootHelper/RootHelper.h"
+      - path: GhostKitApp/RootHelper/RootHelper.c
+        type: file
+        buildPhase: sources
+        compilerFlags:
+          - "-x"
+          - "c"
+    resources:
+      - GhostKitApp/en.lproj
+      - GhostKitApp/zh-Hans.lproj
+      - GhostKitApp/zh-HK.lproj
+      - GhostKitApp/Resources
+    info:
+      path: GhostKitApp/Info.plist
+      properties:
+        CFBundleDisplayName: GhostKit
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: com.ghostkit.app
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundlePackageType: APPL
+        CFBundleInfoDictionaryVersion: "6.0"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen:
+          UIColorName: ""
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIBackgroundModes:
+          - fetch
+          - processing
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ghostkit.app
+        PRODUCT_NAME: GhostKitApp
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+        OTHER_LDFLAGS: "-lsqlite3"
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/GhostKitApp/RootHelper

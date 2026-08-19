@@ -1,5 +1,8 @@
 TARGET := iphone:clang:16.5:17.0
 ARCHS = arm64e
+
+include $(THEOS)/makefiles/common.mk
+
 TWEAK_NAME = GhostKit
 
 GhostKit_FILES = \
