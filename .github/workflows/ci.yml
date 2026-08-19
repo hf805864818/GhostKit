@@ -44,7 +44,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -103,7 +103,7 @@ jobs:
 
       # ── 上传 CHANGELOG artifact ────────────────────────
       - name: 📦 Upload CHANGELOG Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: changelog
           path: CHANGELOG.md
@@ -151,17 +151,20 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── 下载 CHANGELOG artifact ────────────────────────
       - name: 📥 Download CHANGELOG
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: changelog
 
       # ── 安装依赖 ──────────────────────────────────────
       - name: 🔧 Install Dependencies
         run: |
+          # 移除不受信任的 Homebrew tap（消除 CI 警告）
+          brew untap aws/tap 2>/dev/null || true
+
           # 安装 ldid（用于伪造代码签名）
           if ! command -v ldid &> /dev/null; then
             brew install ldid
@@ -319,7 +322,7 @@ jobs:
 
       # ── 上传 artifact ──────────────────────────────────
       - name: 📦 Upload .deb Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: GhostKit-deb
           path: GhostKit-v*.deb
@@ -335,11 +338,11 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── 下载 CHANGELOG artifact ────────────────────────
       - name: 📥 Download CHANGELOG
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: changelog
 
@@ -368,6 +371,9 @@ jobs:
       # ── 安装 xcodegen ─────────────────────────────────
       - name: 🔧 Install xcodegen
         run: |
+          # 移除不受信任的 Homebrew tap（消除 CI 警告）
+          brew untap aws/tap 2>/dev/null || true
+
           brew install xcodegen 2>/dev/null || true
           xcodegen --version 2>/dev/null || echo "xcodegen not found"
 
@@ -529,7 +535,7 @@ jobs:
 
       # ── 上传 artifact ──────────────────────────────────
       - name: 📦 Upload .tipa Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: GhostKit-tipa
           path: GhostKit-v*.tipa
@@ -545,11 +551,11 @@ jobs:
 
     steps:
       - name: 📥 Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── 下载所有 artifacts ────────────────────────────
       - name: 📥 Download All Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
