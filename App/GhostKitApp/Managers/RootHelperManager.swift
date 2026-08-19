@@ -94,7 +94,7 @@ final class RootHelperManager: ObservableObject {
         run(arguments: ["apply-config", bundleID, configPath], completion: completion)
     }
 
-    // MARK: - Core execution (popen)
+    // MARK: - Core execution (C bridge via SpawnBridge)
 
     func run(arguments: [String], completion: @escaping (RootHelperResult) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -105,7 +105,7 @@ final class RootHelperManager: ObservableObject {
         }
     }
 
-    /// Execute RootHelper via popen, capture combined stdout+stderr.
+    /// Execute RootHelper via C bridge (posix_spawn wrapper).
     private func executeHelper(arguments: [String]) -> RootHelperResult {
         let path = self.helperPath
 
@@ -114,30 +114,47 @@ final class RootHelperManager: ObservableObject {
             return .failure("RootHelper binary not found at: \(path)")
         }
 
-        // Build command string with 2>&1 to capture stderr in stdout
-        let escapedArgs = arguments.map { "'\($0)'" }.joined(separator: " ")
-        let command = "'\(path)' \(escapedArgs) 2>&1"
+        // Build argv array as C strings
+        let argc = arguments.count + 2  // path + args + NULL
+        var argv: [UnsafeMutablePointer<CChar>?] = []
+        argv.append(strdup(path))
+        for arg in arguments {
+            argv.append(strdup(arg))
+        }
+        argv.append(nil)
 
-        // Use popen to capture combined output
-        guard let pipe = popen(command, "r") else {
-            return .failure("Failed to open pipe to RootHelper")
+        defer {
+            for ptr in argv {
+                if ptr != nil { free(ptr) }
+            }
         }
 
-        var output = ""
-        var buffer = [CChar](repeating: 0, count: 4096)
-        while fgets(&buffer, Int32(buffer.count), pipe) != nil {
-            output += String(cString: buffer)
-        }
+        // Allocate output buffer (1 MB should be enough)
+        let bufferSize = 1_048_576
+        let outputBuffer = UnsafeMutablePointer<CChar>.allocate(capacity: bufferSize)
+        defer { outputBuffer.deallocate() }
 
-        let status = pclose(pipe)
-        let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Call C bridge function
+        let exitCode = spawn_and_capture(
+            path,
+            argv,
+            outputBuffer,
+            Int32(bufferSize)
+        )
 
-        if status == 0 {
-            return .success(trimmedOutput.isEmpty ? "OK" : trimmedOutput)
+        let output = String(cString: outputBuffer)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if exitCode == 0 {
+            return .success(output.isEmpty ? "OK" : output)
+        } else if exitCode == -1 {
+            return .failure("Failed to spawn RootHelper (posix_spawn error)")
+        } else if exitCode == -2 {
+            return .failure("RootHelper terminated abnormally")
         } else {
-            return .failure(trimmedOutput.isEmpty
-                ? "RootHelper exited with code \(status)"
-                : trimmedOutput)
+            return .failure(output.isEmpty
+                ? "RootHelper exited with code \(exitCode)"
+                : output)
         }
     }
 }
