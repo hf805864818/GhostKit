@@ -8,6 +8,19 @@
 - initial GhostKit v1.0.0
 
 ### 🐛 问题修复
+- CI/CD detached HEAD, Makefile common.mk, xcodegen support
+
+### 📦 其他变更
+- [0;32m[INFO][0m 获取全部提交记录
+- docs(changelog): 自动更新日志 [skip ci]
+- Initial commit
+
+## v1.0.0 - 2026-08-19
+
+### ✨ 新功能
+- initial GhostKit v1.0.0
+
+### 🐛 问题修复
 - (无)
 
 ### 📦 其他变更
