@@ -31,7 +31,6 @@
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
     NSString *file;
     while ((file = [enumerator nextObject])) {
-        NSString *fullPath = [path stringByAppendingPathComponent:file];
         NSDictionary *attrs = [enumerator fileAttributes];
         NSNumber *fileSize = attrs[NSFileSize];
         if (fileSize) {

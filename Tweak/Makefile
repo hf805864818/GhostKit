@@ -18,7 +18,7 @@ GhostKit_FILES = \
     Modules/InjectionManager.m \
     Modules/GraphicsConfigManager.m
 
-GhostKit_CFLAGS = -fobjc-arc -IModules
+GhostKit_CFLAGS = -fobjc-arc -IModules -Wno-unused-variable -Wno-unused-function
 GhostKit_FRAMEWORKS = UIKit Security Foundation AdSupport
 GhostKit_PRIVATE_FRAMEWORKS = SpringBoardServices MobileContainerManager AppSupport
 GhostKit_LIBRARIES = sqlite3
