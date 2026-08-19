@@ -51,7 +51,7 @@ targets:
         CFBundleShortVersionString: "1.0.0"
         CFBundleVersion: "1"
         CFBundleExecutable: $(EXECUTABLE_NAME)
-        CFBundleIdentifier: com.ghostkit.app
+        CFBundleIdentifier: apple.ghostkit
         CFBundleName: $(PRODUCT_NAME)
         CFBundlePackageType: APPL
         CFBundleInfoDictionaryVersion: "6.0"
@@ -69,7 +69,7 @@ targets:
           NSAllowsArbitraryLoads: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ghostkit.app
+        PRODUCT_BUNDLE_IDENTIFIER: apple.ghostkit
         PRODUCT_NAME: GhostKitApp
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: GhostKitApp/GhostKitApp-Bridging-Header.h

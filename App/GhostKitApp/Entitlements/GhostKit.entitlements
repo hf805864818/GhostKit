@@ -10,6 +10,10 @@
     <key>com.apple.private.security.no-container</key>
     <true/>
 
+    <!-- Container manager: manage app containers -->
+    <key>com.apple.private.security.container-manager</key>
+    <true/>
+
     <!-- Read the list of installed applications via MobileCoreServices -->
     <key>com.apple.lsd.applicationlisting</key>
     <true/>
@@ -17,17 +21,23 @@
     <!-- Full access to every keychain group (including apple) -->
     <key>keychain-access-groups</key>
     <array>
-        <string>apple</string>
         <string>*</string>
     </array>
 
-    <!-- TCC: grant Full Disk Access and act as the TCC manager -->
+    <!-- TCC: Full Disk Access + act as TCC manager -->
     <key>com.apple.private.tcc.allow</key>
     <array>
         <string>kTCCServiceSystemPolicyAllFiles</string>
+        <string>kTCCServiceSystemPolicyDocumentsFolder</string>
+        <string>kTCCServiceMicrophone</string>
+        <string>kTCCServiceLiverpool</string>
     </array>
     <key>com.apple.private.tcc.manager</key>
     <true/>
+    <key>com.apple.private.tccd</key>
+    <array>
+        <string>kTCCServiceAll</string>
+    </array>
 
     <!-- Mark as a platform application (entitled system process) -->
     <key>platform-application</key>
@@ -35,34 +45,173 @@
 
     <!-- Read/write access to the entire filesystem absolute path -->
     <key>com.apple.security.exception.files.absolute-path.read-write</key>
-    <string>/</string>
+    <array>
+        <string>/</string>
+    </array>
 
-    <!-- Launch other applications through SpringBoard -->
+    <!-- App Store account access (CRITICAL for reading Apple ID accounts) -->
+    <key>com.apple.private.appstorecomponents</key>
+    <true/>
+    <key>com.apple.itunesstored.private</key>
+    <true/>
+    <key>com.apple.ios.StoreKit.store-page</key>
+    <true/>
+
+    <!-- Mach lookup exceptions for XPC services -->
+    <key>com.apple.security.exception.mach-lookup.global-name</key>
+    <array>
+        <string>com.opa334.jailbreakd</string>
+        <string>com.apple.appstorecomponentsd.xpc</string>
+    </array>
+
+    <!-- Shared preference access for App Store components -->
+    <key>com.apple.security.exception.shared-preference.read-write</key>
+    <array>
+        <string>com.opa334.Dopamine</string>
+        <string>com.apple.AppStoreComponents</string>
+    </array>
+
+    <!-- Launch applications through SpringBoard / FrontBoard / BackBoard -->
     <key>com.apple.springboard.launchapplications</key>
+    <true/>
+    <key>com.apple.springboard.debugapplications</key>
+    <true/>
+    <key>com.apple.springboard.SpringBoardServices</key>
+    <true/>
+    <key>com.apple.springboard.CFUserNotification</key>
+    <true/>
+    <key>com.apple.frontboard.launchapplications</key>
+    <true/>
+    <key>com.apple.frontboard.debugapplications</key>
+    <true/>
+    <key>com.apple.frontboard.systemappservices</key>
+    <true/>
+    <key>com.apple.backboardd.launchapplications</key>
+    <true/>
+    <key>com.apple.backboardd.debugapplications</key>
+    <true/>
+    <key>com.apple.backboard.services</key>
     <true/>
 
     <!-- Access all Apple ID accounts stored on the device -->
     <key>com.apple.private.accounts.allaccounts</key>
     <true/>
 
-    <!-- Mobile installation SPIs: install / uninstall apps -->
+    <!-- Mobile installation SPIs: install / uninstall / update apps -->
     <key>com.apple.private.mobileinstall.allowedSPI</key>
     <array>
+        <string>InstallForLaunchServices</string>
         <string>Install</string>
-        <string>Uninstall</string>
         <string>UninstallForLaunchServices</string>
+        <string>Uninstall</string>
+        <string>UpdatePlaceholderMetadata</string>
     </array>
 
-    <!-- Allow unsigned executable memory (required by some native helpers) -->
+    <!-- Mobile container manager -->
+    <key>com.apple.private.MobileContainerManager.allowed</key>
+    <true/>
+
+    <!-- Process management -->
+    <key>task_for_pid-allow</key>
+    <true/>
+    <key>run-unsigned-code</key>
+    <true/>
+    <key>proc_info-allow</key>
+    <true/>
+    <key>com.apple.system-task-ports</key>
+    <true/>
+    <key>com.apple.system-task-ports.control</key>
+    <true/>
+    <key>com.apple.private.process-management</key>
+    <true/>
+    <key>com.apple.runningboard.process-state</key>
+    <true/>
+
+    <!-- Code signing & debugging -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
-
-    <!-- Allow debugging of other processes -->
     <key>com.apple.security.cs.debugger</key>
     <true/>
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
+    <key>get-task-allow</key>
+    <true/>
 
-    <!-- Run unsigned code (TrollStore helper) -->
-    <key>com.apple.private.cs.debugger.skills</key>
+    <!-- Network access -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- WiFi manager access -->
+    <key>com.apple.wifi.manager-access</key>
+    <true/>
+
+    <!-- Location services -->
+    <key>com.apple.locationd.authorizeapplications</key>
+    <true/>
+    <key>com.apple.locationd.simulation</key>
+    <true/>
+
+    <!-- IOKit user client classes for graphics/display -->
+    <key>com.apple.security.iokit-user-client-class</key>
+    <array>
+        <string>AGXDeviceUserClient</string>
+        <string>IOHDIXControllerUserClient</string>
+        <string>IOMobileFramebufferUserClient</string>
+        <string>IOSurfaceRootUserClient</string>
+    </array>
+
+    <!-- Application groups -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>com.apple.frontboard.systemappservices</string>
+    </array>
+
+    <!-- XPC service creation -->
+    <key>com.apple.private.xpc.service-creation</key>
+    <true/>
+    <key>com.apple.private.xpc.launchd.job-manager</key>
+    <string>com.apple.runningboard</string>
+    <key>com.apple.private.launchd.job-submission</key>
+    <true/>
+
+    <!-- Persona management -->
+    <key>com.apple.private.persona-mgmt</key>
+    <true/>
+    <key>com.apple.private.xpc.persona-manager</key>
+    <true/>
+
+    <!-- Plugin kit -->
+    <key>com.apple.private.pluginkit</key>
+    <true/>
+
+    <!-- Avatar store -->
+    <key>com.apple.private.avatar.store</key>
+    <true/>
+
+    <!-- Jetsam / memory status -->
+    <key>com.apple.private.kernel.jetsam</key>
+    <true/>
+    <key>com.apple.private.memorystatus</key>
+    <true/>
+
+    <!-- Thread state -->
+    <key>com.apple.private.thread-set-state</key>
+    <true/>
+    <key>com.apple.private.xpc.domain-extension.proxy</key>
+    <true/>
+
+    <!-- Developer driverkit -->
+    <key>com.apple.developer.driverkit</key>
+    <true/>
+
+    <!-- CommCenter -->
+    <key>com.apple.CommCenter.fine-grained</key>
+    <array>
+        <string>data-allowed-write</string>
+    </array>
+
+    <!-- Associated domains -->
+    <key>com.apple.developer.associated-domains</key>
     <true/>
 </dict>
 </plist>
