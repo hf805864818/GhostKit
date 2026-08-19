@@ -334,6 +334,14 @@ int clean_keychain(const char *bundleID) {
     LOG("clean_keychain for '%s'", bundleID);
 
     /*
+     * Stop securityd so it releases the lock on keychain-2.db.
+     * Without this, sqlite3_open / sqlite3_exec fail because
+     * securityd holds an exclusive lock on the database file.
+     */
+    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    usleep(500000);  /* Wait 0.5s for securityd to release the lock */
+
+    /*
      * keychain-2.db schema (root-only):
      *   genp  - generic passwords  (acct, svce, agrp)
      *   inet  - internet passwords (acct, svce, agrp)
@@ -366,6 +374,9 @@ int clean_keychain(const char *bundleID) {
              "(SELECT rowid FROM metadata WHERE label LIKE 'apple.default-identifier' "
              "OR label LIKE 'apple.default-keychain');");
 
+    /* Restart securityd so it picks up the modified database. */
+    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+
     if (errors > 0) {
         LOG("clean_keychain completed with %d table errors", errors);
     }
@@ -379,6 +390,10 @@ int deep_clean_keychain(const char *bundleID) {
     }
 
     LOG("deep_clean_keychain for '%s'", bundleID);
+
+    /* Stop securityd to release the database lock before direct sqlite access. */
+    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    usleep(500000);
 
     /* Deep clean removes ALL rows that could be associated, including
      * group access table entries, sync views, and the backup metadata. */
@@ -412,12 +427,19 @@ int deep_clean_keychain(const char *bundleID) {
     /* Vacuum to compact the database after deletion. */
     sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
 
+    /* Restart securityd after database modifications. */
+    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+
     LOG_OK("deep_clean_keychain done for '%s'", bundleID);
     return errors == 0 ? 0 : 0;
 }
 
 int delete_all_keychains(void) {
     LOG("delete_all_keychains - backing up then truncating");
+
+    /* Stop securityd to release the database lock. */
+    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    usleep(500000);
 
     /* Create backup directory. */
     mkdir_p(KEYCHAIN_BACKUP_DIR, 0755);
@@ -442,6 +464,9 @@ int delete_all_keychains(void) {
     }
 
     sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
+
+    /* Restart securityd. */
+    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
 
     LOG_OK("delete_all_keychains done");
     return 0;
@@ -575,42 +600,59 @@ static int find_data_container(const char *bundleID, char *out_path, size_t out_
         if (entry->d_name[0] == '.') {
             continue;
         }
-        /* Check the .com.apple.mobile_container_manager metadata plist. */
+
+        /*
+         * Check the .com.apple.mobile_container_manager.plist metadata file.
+         * This is a binary plist containing MCContainerIdentifier which holds
+         * the bundle ID.  We use plutil to parse it reliably.
+         */
         char plist_path[MAX_CMD_LEN];
         snprintf(plist_path, sizeof(plist_path),
-                 "%s/%s/.com.apple.mobile_container_manager",
+                 "%s/%s/.com.apple.mobile_container_manager.plist",
                  data_root, entry->d_name);
 
-        FILE *f = fopen(plist_path, "r");
-        if (f == NULL) {
-            continue;
+        struct stat st;
+        if (stat(plist_path, &st) != 0) {
+            /* Also try without the .plist extension (older iOS versions). */
+            snprintf(plist_path, sizeof(plist_path),
+                     "%s/%s/.com.apple.mobile_container_manager",
+                     data_root, entry->d_name);
+            if (stat(plist_path, &st) != 0) {
+                continue;
+            }
         }
 
-        /* Read plist as binary plist; check for bundleID in the XML. */
-        char line[1024];
-        while (fgets(line, sizeof(line), f) != NULL) {
-            if (strstr(line, bundleID) != NULL) {
+        /* Use plutil to extract MCContainerIdentifier from the binary plist. */
+        char cmd[MAX_CMD_LEN];
+        snprintf(cmd, sizeof(cmd),
+                 "/usr/bin/plutil -extract MCContainerIdentifier raw '%s' 2>/dev/null",
+                 plist_path);
+
+        char container_id[512] = {0};
+        if (run_shell_capture(cmd, container_id, sizeof(container_id)) == 0) {
+            /* Strip whitespace/newlines. */
+            char *s = container_id;
+            size_t len = strlen(s);
+            while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r' ||
+                               s[len-1] == ' '  || s[len-1] == '"')) {
+                s[--len] = '\0';
+            }
+            while (*s == '"' || *s == ' ') s++;
+
+            if (strcmp(s, bundleID) == 0) {
                 snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
                 found = 1;
                 break;
             }
         }
-        fclose(f);
 
-        if (found) {
-            break;
-        }
-
-        /* Fallback: check the BundleMetadata plist. */
-        char meta_path[MAX_CMD_LEN];
-        snprintf(meta_path, sizeof(meta_path),
-                 "%s/%s/.com.apple.mobile_container_manager/BundleMetadata.plist",
-                 data_root, entry->d_name);
-        /* The metadata plist is binary, so check with plutil. */
-        char cmd[MAX_CMD_LEN];
+        /*
+         * Fallback: grep the plist for the bundle ID in case
+         * MCContainerIdentifier is absent or named differently.
+         */
         snprintf(cmd, sizeof(cmd),
                  "/usr/bin/plutil -p '%s' 2>/dev/null | grep -q '%s'",
-                 meta_path, bundleID);
+                 plist_path, bundleID);
         if (run_shell(cmd) == 0) {
             snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
             found = 1;
@@ -780,9 +822,14 @@ int reset_device(void) {
     run_simple("/usr/bin/defaults", "delete",
                "com.apple.advertisingIdentifier", NULL);
 
-    /* 6. Remove the wifi/SSID cache (forces re-authentication) */
-    sql_exec("/private/var/mobile/Library/Preferences/com.apple.wifi.plist",
-             "DELETE FROM wifi_networks;");
+    /* 6. Remove the wifi/SSID cache (forces re-authentication).
+     * com.apple.wifi.plist is a plist file, NOT a SQLite database.
+     * Use `defaults delete` to remove cached networks. */
+    run_simple("/usr/bin/defaults", "delete",
+               "com.apple.wifi", NULL);
+    /* Also delete the WiFi scan cache plist. */
+    run_simple("/bin/rm", "-f",
+               "/private/var/mobile/Library/Preferences/com.apple.wifi.plist", NULL);
 
     /* 7. Reset the Bluetooth cache */
     run_simple("/bin/rm", "-rf",
@@ -808,6 +855,14 @@ int allow_paste_all(void) {
     LOG("allow_paste_all - granting paste permission to all apps");
 
     /*
+     * Stop tccd so it releases the lock on TCC.db.
+     * Without this, sqlite3_open / sqlite3_exec fail because
+     * tccd holds an exclusive lock on the database file.
+     */
+    run_simple("/bin/launchctl", "stop", "com.apple.tccd", NULL);
+    usleep(300000);  /* 0.3s for tccd to release the lock */
+
+    /*
      * TCC.db 'access' table schema:
      *   service         TEXT
      *   client          TEXT     (bundle ID)
@@ -826,6 +881,7 @@ int allow_paste_all(void) {
     if (sqlite3_open(TCC_DB_PATH, &db) != SQLITE_OK) {
         LOG("allow_paste_all: cannot open TCC.db: %s", sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
+        run_simple("/bin/launchctl", "start", "com.apple.tccd", NULL);
         return -1;
     }
 
@@ -915,6 +971,9 @@ int allow_paste_all(void) {
     }
 
     sqlite3_close(db);
+
+    /* Restart tccd so it picks up the modified TCC.db. */
+    run_simple("/bin/launchctl", "start", "com.apple.tccd", NULL);
 
     LOG_OK("allow_paste_all done");
     return 0;
@@ -1050,58 +1109,174 @@ int apply_config(const char *bundleID, const char *configPath) {
 
     LOG("apply_config '%s' <- '%s'", bundleID, configPath);
 
-    /* Read the JSON config file. */
+    /* Read the preset name from the config file. */
+    char preset[128] = {0};
     FILE *f = fopen(configPath, "r");
     if (f == NULL) {
         LOG("apply_config: cannot read config '%s'", configPath);
         return -1;
     }
-
-    char json[4096];
-    size_t n = fread(json, 1, sizeof(json) - 1, f);
-    json[n] = '\0';
+    size_t n = fread(preset, 1, sizeof(preset) - 1, f);
+    preset[n] = '\0';
     fclose(f);
+
+    /* Trim whitespace and quotes. */
+    char *p = preset;
+    while (*p == ' ' || *p == '"' || *p == '\n' || *p == '\r') p++;
+    size_t plen = strlen(p);
+    while (plen > 0 && (p[plen-1] == '\n' || p[plen-1] == '\r' ||
+                         p[plen-1] == ' ' || p[plen-1] == '"')) {
+        p[--plen] = '\0';
+    }
 
     /* Find the app's data container. */
     char container[MAX_CMD_LEN];
     if (find_data_container(bundleID, container, sizeof(container)) != 0) {
-        LOG("apply_config: container not found, writing to shared prefs");
-        snprintf(container, sizeof(container), "/private/var/mobile/Library/Preferences");
-    }
-
-    /* Write the config as a plist override in the app's preferences. */
-    char prefs_path[MAX_CMD_LEN];
-    snprintf(prefs_path, sizeof(prefs_path),
-             "%s/Library/Preferences/%s.graphics.plist", container, bundleID);
-
-    /* Ensure the Preferences directory exists. */
-    char prefs_dir[MAX_CMD_LEN];
-    snprintf(prefs_dir, sizeof(prefs_dir), "%s/Library/Preferences", container);
-    mkdir_p(prefs_dir, 0755);
-
-    /* Write the config JSON to a file the app can read. */
-    char config_dest[MAX_CMD_LEN];
-    snprintf(config_dest, sizeof(config_dest),
-             "%s/Documents/graphics_config.json", container);
-    char docs_dir[MAX_CMD_LEN];
-    snprintf(docs_dir, sizeof(docs_dir), "%s/Documents", container);
-    mkdir_p(docs_dir, 0755);
-
-    FILE *out = fopen(config_dest, "w");
-    if (out == NULL) {
-        LOG("apply_config: cannot write to '%s'", config_dest);
+        LOG("apply_config: container not found for '%s'", bundleID);
         return -1;
     }
-    fprintf(out, "%s", json);
-    fclose(out);
 
-    /* Also write the config into the app's preferences plist so it loads
-     * automatically via NSUserDefaults. */
-    /* Use defaults write for each known key. */
-    run_simple("/usr/bin/defaults", "write", bundleID,
-               "GraphicsConfig", json, NULL);
+    /* Scan Documents/UE4Game/ for the project directory name.
+     * Each UE4 game uses a different project name (e.g., ShadowTrackerExtra
+     * for PUBG Mobile), so we dynamically discover it rather than
+     * hardcoding. */
+    char ue4_dir[MAX_CMD_LEN];
+    snprintf(ue4_dir, sizeof(ue4_dir), "%s/Documents/UE4Game", container);
+    DIR *dir = opendir(ue4_dir);
+    if (dir == NULL) {
+        LOG("apply_config: UE4Game directory not found at '%s'", ue4_dir);
+        return -1;
+    }
 
-    LOG_OK("apply_config done for '%s'", bundleID);
+    /* Handle "restore" preset: delete UserCustom.ini to restore defaults. */
+    if (strcmp(p, "restore") == 0) {
+        int restored = 0;
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_name[0] == '.') continue;
+            char ini_path[MAX_CMD_LEN];
+            snprintf(ini_path, sizeof(ini_path),
+                     "%s/%s/Saved/Config/IOS/UserCustom.ini",
+                     ue4_dir, entry->d_name);
+            if (unlink(ini_path) == 0) {
+                LOG("apply_config: deleted '%s'", ini_path);
+                restored = 1;
+            }
+        }
+        closedir(dir);
+        if (restored) {
+            LOG_OK("apply_config: restored defaults for '%s'", bundleID);
+        }
+        return restored ? 0 : -1;
+    }
+
+    /* Map preset name to quality level. */
+    int level = 1;  /* Default to medium */
+    if (strcmp(p, "流畅") == 0 || strcmp(p, "low") == 0) {
+        level = 0;
+    } else if (strcmp(p, "平衡") == 0 || strcmp(p, "medium") == 0) {
+        level = 1;
+    } else if (strcmp(p, "高清") == 0 || strcmp(p, "high") == 0) {
+        level = 2;
+    } else if (strcmp(p, "极致") == 0 || strcmp(p, "ultra") == 0) {
+        level = 3;
+    } else if (strcmp(p, "自定义") == 0 || strcmp(p, "custom") == 0) {
+        level = 1;  /* Custom defaults to medium-equivalent */
+    }
+
+    /*
+     * UE4 scalability group quality table per level:
+     * [0]=ResolutionQuality(50-100), [1]=ViewDistance,
+     * [2]=AntiAliasing, [3]=Shadow, [4]=PostProcess,
+     * [5]=Texture, [6]=Effects, [7]=Foliage
+     */
+    static const int q[4][8] = {
+        {50,  0, 0, 0, 0, 0, 0, 0},   /* 流畅 */
+        {75,  1, 1, 1, 1, 1, 1, 1},   /* 平衡 */
+        {100, 2, 2, 2, 2, 2, 2, 2},   /* 高清 */
+        {100, 3, 3, 3, 3, 3, 3, 3},   /* 极致 */
+    };
+    static const char *scale_factor[4] = {"1.0", "1.5", "2.0", "2.5"};
+    static const char *mobile_hdr[4]   = {"False", "False", "True", "True"};
+    static const char *fps_limit[4]     = {"30", "45", "60", "120"};
+
+    /* Generate UE4 INI content in [UserCustom DeviceProfile] format. */
+    char ini[4096];
+    snprintf(ini, sizeof(ini),
+        "[UserCustom DeviceProfile]\n"
+        "+CVars=sg.ResolutionQuality=%d\n"
+        "+CVars=sg.ViewDistanceQuality=%d\n"
+        "+CVars=sg.AntiAliasingQuality=%d\n"
+        "+CVars=sg.ShadowQuality=%d\n"
+        "+CVars=sg.PostProcessQuality=%d\n"
+        "+CVars=sg.TextureQuality=%d\n"
+        "+CVars=sg.EffectsQuality=%d\n"
+        "+CVars=sg.FoliageQuality=%d\n"
+        "+CVars=r.MobileContentScaleFactor=%s\n"
+        "+CVars=r.MobileHDR=%s\n"
+        "+CVars=r.MobileOnChipMSAA=%s\n"
+        "+CVars=r.DynamicResolution=%s\n"
+        "+CVars=r.FPSLimit=%s\n"
+        "+CVars=r.AmbientOcclusion.ComputeHLOD=%s\n"
+        "+CVars=r.BloomQuality=%d\n"
+        "+CVars=r.DepthOfFieldQuality=%d\n"
+        "+CVars=r.DetailMode=%d\n"
+        "+CVars=r.DistanceFieldShadowing=%s\n"
+        "+CVars=r.EyeAdaptationQuality=%d\n"
+        "+CVars=r.LensFlareQuality=%d\n"
+        "+CVars=r.LightShaftQuality=%d\n"
+        "+CVars=r.PostProcessAAQuality=%d\n"
+        "+CVars=r.ShadowQuality=%d\n"
+        "+CVars=r.Streaming.LimitPoolSizeToVRAM=True\n"
+        "+CVars=r.TonemapQuality=%d\n"
+        "+CVars=r.ViewDistance=%d\n"
+        "+CVars=r.ForceLODShadow=%s\n",
+        q[level][0], q[level][1], q[level][2], q[level][3],
+        q[level][4], q[level][5], q[level][6], q[level][7],
+        scale_factor[level], mobile_hdr[level],
+        level >= 2 ? "True" : "False",
+        level >= 2 ? "True" : "False",
+        fps_limit[level],
+        level >= 1 ? "True" : "False",
+        q[level][4], q[level][4], q[level][1],
+        level >= 2 ? "True" : "False",
+        q[level][4], q[level][4], q[level][4], q[level][4], q[level][3],
+        q[level][4], q[level][1],
+        level >= 1 ? "True" : "False");
+
+    /* Write UserCustom.ini to the first matching UE4 project directory. */
+    int success = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+
+        /* Ensure config directory exists. */
+        char config_dir[MAX_CMD_LEN];
+        snprintf(config_dir, sizeof(config_dir),
+                 "%s/%s/Saved/Config/IOS", ue4_dir, entry->d_name);
+        mkdir_p(config_dir, 0755);
+
+        char ini_path[MAX_CMD_LEN];
+        snprintf(ini_path, sizeof(ini_path),
+                 "%s/UserCustom.ini", config_dir);
+
+        FILE *out = fopen(ini_path, "w");
+        if (out != NULL) {
+            fputs(ini, out);
+            fclose(out);
+            LOG("apply_config: wrote '%s'", ini_path);
+            success = 1;
+            break;
+        }
+    }
+    closedir(dir);
+
+    if (!success) {
+        LOG("apply_config: failed to write UserCustom.ini");
+        return -1;
+    }
+
+    LOG_OK("apply_config done for '%s' (preset=%s, level=%d)", bundleID, p, level);
     return 0;
 }
 

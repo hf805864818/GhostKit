@@ -41,17 +41,13 @@ enum GraphicsPreset: String, CaseIterable, Identifiable {
     }
 
     var configPayload: String {
+        // Return just the preset name; RootHelper generates the UE4 INI.
         switch self {
-        case .low:
-            return "{\"fps\":30,\"resolution\":0.5,\"anti_aliasing\":0,\"shadows\":0,\"textures\":0}"
-        case .medium:
-            return "{\"fps\":45,\"resolution\":0.75,\"anti_aliasing\":1,\"shadows\":1,\"textures\":1}"
-        case .high:
-            return "{\"fps\":60,\"resolution\":1.0,\"anti_aliasing\":1,\"shadows\":1,\"textures\":2}"
-        case .ultra:
-            return "{\"fps\":120,\"resolution\":1.0,\"anti_aliasing\":1,\"shadows\":2,\"textures\":2}"
-        case .custom:
-            return "{\"fps\":60,\"resolution\":1.0,\"anti_aliasing\":1,\"shadows\":1,\"textures\":1}"
+        case .low:    return "流畅"
+        case .medium: return "平衡"
+        case .high:   return "高清"
+        case .ultra:  return "极致"
+        case .custom: return "自定义"
         }
     }
 }
@@ -263,9 +259,11 @@ struct GraphicsConfigView: View {
         guard let game = selectedGame else { return }
         loading = true
         selectedPreset = .medium
+
+        // Restore default by writing "restore" as the preset name.
+        // RootHelper will delete the UserCustom.ini to restore defaults.
         let tempPath = NSTemporaryDirectory().appending("ghostkit_config.json")
-        let config = GraphicsPreset.medium.configPayload
-        try? config.write(toFile: tempPath, atomically: true, encoding: .utf8)
+        try? "restore".write(toFile: tempPath, atomically: true, encoding: .utf8)
 
         helper.applyConfig(bundleID: game.bundleIdentifier, configPath: tempPath) { result in
             loading = false

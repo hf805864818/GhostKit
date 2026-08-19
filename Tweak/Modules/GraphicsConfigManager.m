@@ -6,7 +6,10 @@
 //  Supported games: 和平精英, 王者荣耀, 光遇, 穿越火线, 使命召唤,
 //  火影忍者, DNF.
 //
-//  Config path: Documents/UE4Game/ShadowTrackerExtra/Saved/Config/IOS/UserCustom.ini
+//  Config path: dynamically discovered per game by scanning
+//  Documents/UE4Game/<ProjectName>/Saved/Config/IOS/UserCustom.ini
+//  Each UE4 game uses a different project name, so the path is
+//  resolved at runtime rather than hardcoded.
 //
 
 #import "GraphicsConfigManager.h"
@@ -34,18 +37,59 @@
         // 光遇 (Sky: Children of the Light)
         @"com.netease.sky":          @"光遇",
         // 穿越火线 (CrossFire Mobile)
-        @"com.tencent.cf":           @"穿越火线",
+        @"com.tencent.tmgp.cf":      @"穿越火线",
         // 使命召唤 (Call of Duty Mobile)
-        @"com.tencent.codm":         @"使命召唤",
+        @"com.tencent.tmgp.codm":    @"使命召唤",
         // 火影忍者 (Naruto Mobile)
-        @"com.tencent.hgjy":         @"火影忍者",
+        @"com.tencent.tmgp.hgjy":    @"火影忍者",
         // DNF (DNF Mobile)
-        @"com.tencent.dnf":          @"DNF",
+        @"com.tencent.cdnf":         @"DNF",
     };
 }
 
 - (NSString *)configPathForBundleID:(NSString *)bundleID {
-    // All supported games use the same UE4-relative config path.
+    /*
+     * Each UE4 game uses a different project name (e.g., ShadowTrackerExtra
+     * for PUBG Mobile, SkyGame for 光遇, etc.).  Instead of hardcoding,
+     * we scan the Documents/UE4Game/ directory for the project folder.
+     *
+     * This method returns a RELATIVE path.  fullConfigPathForBundleID:
+     * prepends the app's data container path.
+     */
+    NSString *dataPath = [[AppListManager sharedInstance] getDataContainerPathForBundleID:bundleID];
+    if (!dataPath) {
+        // Fallback to the hardcoded PUBG path if we can't resolve.
+        return @"Documents/UE4Game/ShadowTrackerExtra/Saved/Config/IOS/UserCustom.ini";
+    }
+
+    NSString *ue4Dir = [dataPath stringByAppendingPathComponent:@"Documents/UE4Game"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *subdirs = [fm contentsOfDirectoryAtPath:ue4Dir error:nil];
+
+    for (NSString *subdir in subdirs) {
+        // Skip hidden files.
+        if ([subdir hasPrefix:@"."]) continue;
+
+        NSString *candidatePath = [NSString stringWithFormat:
+            @"Documents/UE4Game/%@/Saved/Config/IOS/UserCustom.ini", subdir];
+
+        // Check if this looks like a UE4 project directory.
+        NSString *savedDir = [dataPath stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"Documents/UE4Game/%@/Saved", subdir]];
+        if ([fm fileExistsAtPath:savedDir]) {
+            return candidatePath;
+        }
+    }
+
+    // Fallback: use the first subdirectory found, even if Saved doesn't exist yet.
+    for (NSString *subdir in subdirs) {
+        if (![subdir hasPrefix:@"."]) {
+            return [NSString stringWithFormat:
+                @"Documents/UE4Game/%@/Saved/Config/IOS/UserCustom.ini", subdir];
+        }
+    }
+
+    // Last resort: PUBG Mobile default.
     return @"Documents/UE4Game/ShadowTrackerExtra/Saved/Config/IOS/UserCustom.ini";
 }
 
@@ -126,6 +170,39 @@
         };
     }
 
+    if ([preset isEqualToString:@"高清"]) {
+        return @{
+            @"r.MobileContentScaleFactor":   @"1.1",
+            @"r.AmbientOcclusion":           @"1",
+            @"r.DepthOfField":               @"1",
+            @"r.LensFlare":                  @"0",
+            @"r.Bloom":                      @"1",
+            @"r.MobileHDR":                  @"1",
+            @"r.MobileHDR32bpp":             @"1",
+            @"r.PostProcessing":             @"1",
+            @"r.ShadowQuality":              @"1",
+            @"r.MobileDynamicCSMShadow":      @"1",
+            @"r.MobileShadowQuality":         @"2",
+            @"r.MobileAntiAliasing":         @"1",
+            @"r.MobileMSAA":                 @"0",
+            @"r.MobileFXAA":                 @"1",
+            @"r.RefractionQuality":          @"1",
+            @"r.ReflectionEnvironment":       @"2",
+            @"r.MobileReflectionCapture":    @"2",
+            @"r.SceneColorFringeQuality":     @"0",
+            @"r.VolumetricFog":              @"0",
+            @"r.ViewDistanceScale":          @"1.2",
+            @"r.TextureStreaming":           @"1",
+            @"r.TextureMinQuality":          @"2",
+            @"foliage.AntiTileNormal":      @"1",
+            @"r.MobileNumDynamicPointLights": @"1",
+            @"r.Mobile.EnableMovableLightCSM": @"1",
+            @"r.LightMaxDrawDistanceScale":  @"1.2",
+            @"foliage.DitheringLOD":         @"1",
+            @"r.Mobile.AdaptiveHQ":          @"1",
+        };
+    }
+
     if ([preset isEqualToString:@"极致"]) {
         return @{
             @"r.MobileContentScaleFactor":   @"1.2",
@@ -156,6 +233,12 @@
             @"foliage.DitheringLOD":         @"1",
             @"r.Mobile.AdaptiveHQ":          @"1",
         };
+    }
+
+    if ([preset isEqualToString:@"自定义"]) {
+        // Custom preset: same as 平衡 as a starting point.
+        // Users can manually edit the INI afterwards.
+        return [self settingsForPreset:@"平衡"];
     }
 
     return @{};
@@ -307,7 +390,7 @@
 #pragma mark - Available presets
 
 - (NSArray<NSString *> *)getAvailablePresets {
-    return @[@"流畅", @"平衡", @"极致"];
+    return @[@"流畅", @"平衡", @"高清", @"极致", @"自定义"];
 }
 
 #pragma mark - Get current config

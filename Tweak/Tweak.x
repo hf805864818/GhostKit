@@ -5,10 +5,17 @@
 //  Logos Hook entry point. Hooks UIApplication to register
 //  Darwin notification observers for all GhostKit commands.
 //
+//  Uses CFNotificationCenterGetDarwinNotifyCenter() for cross-process
+//  communication.  Darwin notifications cannot carry userInfo, so
+//  command parameters are passed via a shared plist file and results
+//  are written back to another shared file.
+//
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 
 #import "Modules/KeychainManager.h"
 #import "Modules/IdentifierManager.h"
@@ -20,6 +27,14 @@
 #import "Modules/SystemManager.h"
 #import "Modules/InjectionManager.h"
 #import "Modules/GraphicsConfigManager.h"
+
+// ---------------------------------------------------------------------------
+// Shared file paths for cross-process parameter / result passing
+// ---------------------------------------------------------------------------
+
+static NSString *const kGhostKitDir       = @"/var/mobile/Library/GhostKit";
+static NSString *const kCommandFilePath  = @"/var/mobile/Library/GhostKit/command.plist";
+static NSString *const kResultFilePath    = @"/var/mobile/Library/GhostKit/result.plist";
 
 // ---------------------------------------------------------------------------
 // Notification name constants
@@ -76,7 +91,7 @@ static NSString *const kNotifGetCurrentGraphics    = @"GhostKitGetCurrentGraphic
 static NSString *const kNotifRestoreDefaultGraphics = @"GhostKitRestoreDefaultGraphics";
 
 // ---------------------------------------------------------------------------
-// GhostKitObserver - receives NSNotification posted from control UI
+// GhostKitObserver - receives Darwin notifications and dispatches to handlers
 // ---------------------------------------------------------------------------
 
 @interface GhostKitObserver : NSObject
@@ -86,6 +101,96 @@ static NSString *const kNotifRestoreDefaultGraphics = @"GhostKitRestoreDefaultGr
 - (void)postResult:(id)result forCommand:(NSString *)command;
 
 @end
+
+// ---------------------------------------------------------------------------
+// C callback for Darwin notification center.
+// Darwin notifications cannot carry userInfo, so we read command parameters
+// from a shared plist file, create a synthetic NSNotification, and dispatch
+// to the appropriate ObjC handler method.
+// ---------------------------------------------------------------------------
+
+static void ghostkit_darwin_callback(CFNotificationCenterRef center,
+                                      const void *observer,
+                                      CFStringRef name,
+                                      const void *object,
+                                      CFDictionaryRef userInfo)
+{
+    if (!observer || !name) return;
+
+    GhostKitObserver *obs = (__bridge GhostKitObserver *)observer;
+    NSString *notifName = (__bridge NSString *)name;
+
+    // Read command parameters from the shared file.
+    NSDictionary *params = [NSDictionary dictionaryWithContentsOfFile:kCommandFilePath];
+
+    // Build a synthetic NSNotification so existing handlers work unchanged.
+    NSNotification *note = [NSNotification notificationWithName:notifName
+                                                          object:nil
+                                                        userInfo:params];
+
+    // Map notification name → handler selector.
+    static NSDictionary<NSString *, NSString *> *handlerMap = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        handlerMap = @{
+            kNotifCleanKeychain:           NSStringFromSelector(@selector(handleCleanKeychain:)),
+            kNotifDeepCleanKeychain:       NSStringFromSelector(@selector(handleDeepCleanKeychain:)),
+            kNotifDeleteAllKeychains:      NSStringFromSelector(@selector(handleDeleteAllKeychains:)),
+            kNotifBackupKeychain:          NSStringFromSelector(@selector(handleBackupKeychain:)),
+            kNotifRestoreKeychain:         NSStringFromSelector(@selector(handleRestoreKeychain:)),
+            kNotifListKeychain:            NSStringFromSelector(@selector(handleListKeychain:)),
+
+            kNotifRefreshIDFA:             NSStringFromSelector(@selector(handleRefreshIDFA:)),
+            kNotifChangeIdentifier:        NSStringFromSelector(@selector(handleChangeIdentifier:)),
+            kNotifGetCurrentIdentifiers:   NSStringFromSelector(@selector(handleGetCurrentIdentifiers:)),
+
+            kNotifResetDevice:             NSStringFromSelector(@selector(handleResetDevice:)),
+            kNotifGetDeviceInfo:           NSStringFromSelector(@selector(handleGetDeviceInfo:)),
+
+            kNotifCleanSystemResidue:      NSStringFromSelector(@selector(handleCleanSystemResidue:)),
+            kNotifCleanDatabaseCache:      NSStringFromSelector(@selector(handleCleanDatabaseCache:)),
+            kNotifCleanDataDirectory:      NSStringFromSelector(@selector(handleCleanDataDirectory:)),
+            kNotifCleanCookies:            NSStringFromSelector(@selector(handleCleanCookies:)),
+            kNotifCleanPasteboard:         NSStringFromSelector(@selector(handleCleanPasteboard:)),
+            kNotifGetAppSize:              NSStringFromSelector(@selector(handleGetAppSize:)),
+
+            kNotifGetAllApps:              NSStringFromSelector(@selector(handleGetAllApps:)),
+            kNotifSearchApps:              NSStringFromSelector(@selector(handleSearchApps:)),
+            kNotifUninstallApp:            NSStringFromSelector(@selector(handleUninstallApp:)),
+            kNotifGetAppInfo:              NSStringFromSelector(@selector(handleGetAppInfo:)),
+
+            kNotifGetAccountList:          NSStringFromSelector(@selector(handleGetAccountList:)),
+            kNotifAddAccount:              NSStringFromSelector(@selector(handleAddAccount:)),
+            kNotifDeleteAccount:           NSStringFromSelector(@selector(handleDeleteAccount:)),
+            kNotifGetCurrentAccount:       NSStringFromSelector(@selector(handleGetCurrentAccount:)),
+            kNotifSwitchAccount:           NSStringFromSelector(@selector(handleSwitchAccount:)),
+
+            kNotifAllowPasteForAll:        NSStringFromSelector(@selector(handleAllowPasteForAll:)),
+            kNotifIsPasteAllowed:          NSStringFromSelector(@selector(handleIsPasteAllowed:)),
+
+            kNotifSafeExit:                NSStringFromSelector(@selector(handleSafeExit:)),
+            kNotifRespring:                NSStringFromSelector(@selector(handleRespring:)),
+            kNotifLdrestart:               NSStringFromSelector(@selector(handleLdrestart:)),
+
+            kNotifInjectDylib:             NSStringFromSelector(@selector(handleInjectDylib:)),
+            kNotifRemoveDylib:             NSStringFromSelector(@selector(handleRemoveDylib:)),
+            kNotifGetInjectedDylibs:       NSStringFromSelector(@selector(handleGetInjectedDylibs:)),
+
+            kNotifApplyGraphicsConfig:     NSStringFromSelector(@selector(handleApplyGraphicsConfig:)),
+            kNotifGetAvailablePresets:     NSStringFromSelector(@selector(handleGetAvailablePresets:)),
+            kNotifGetCurrentGraphics:      NSStringFromSelector(@selector(handleGetCurrentGraphics:)),
+            kNotifRestoreDefaultGraphics:  NSStringFromSelector(@selector(handleRestoreDefaultGraphics:)),
+        };
+    });
+
+    NSString *selStr = handlerMap[notifName];
+    if (selStr) {
+        SEL sel = NSSelectorFromString(selStr);
+        if ([obs respondsToSelector:sel]) {
+            ((void(*)(id, SEL, id))objc_msgSend)(obs, sel, note);
+        }
+    }
+}
 
 @implementation GhostKitObserver
 
@@ -99,11 +204,77 @@ static NSString *const kNotifRestoreDefaultGraphics = @"GhostKitRestoreDefaultGr
 }
 
 - (void)postResult:(id)result forCommand:(NSString *)command {
-    NSDictionary *userInfo = result ? @{ @"result": result, @"command": command }
-                                    : @{ @"command": command };
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"GhostKitResult"
-                                                        object:nil
-                                                      userInfo:userInfo];
+    /*
+     * Write the result to a shared plist file so the App process can
+     * read it.  Non-plist-serializable objects (AppInfo, AppStoreAccount)
+     * are converted to dictionaries before writing.
+     */
+    NSMutableDictionary *resultDict = [NSMutableDictionary dictionary];
+    resultDict[@"command"] = command;
+    resultDict[@"timestamp"] = [NSDate date].description;
+
+    if (result && result != [NSNull null]) {
+        id serializable = result;
+
+        // Convert AppInfo to dictionary.
+        if ([result isKindOfClass:[AppInfo class]]) {
+            AppInfo *info = (AppInfo *)result;
+            serializable = @{
+                @"bundleID":   info.bundleID ?: @"",
+                @"name":       info.name ?: @"",
+                @"version":    info.version ?: @"",
+                @"iconPath":   info.iconPath ?: @"",
+                @"dataPath":   info.dataPath ?: @"",
+                @"bundlePath": info.bundlePath ?: @"",
+            };
+        }
+        // Convert AppStoreAccount to dictionary.
+        else if ([result isKindOfClass:[AppStoreAccount class]]) {
+            serializable = [result toDictionary];
+        }
+        // Arrays may contain AppInfo/AppStoreAccount objects.
+        else if ([result isKindOfClass:[NSArray class]]) {
+            NSMutableArray *arr = [NSMutableArray array];
+            for (id item in (NSArray *)result) {
+                if ([item isKindOfClass:[AppInfo class]]) {
+                    AppInfo *info = (AppInfo *)item;
+                    [arr addObject:@{
+                        @"bundleID":   info.bundleID ?: @"",
+                        @"name":       info.name ?: @"",
+                        @"version":    info.version ?: @"",
+                        @"iconPath":   info.iconPath ?: @"",
+                        @"dataPath":   info.dataPath ?: @"",
+                        @"bundlePath": info.bundlePath ?: @"",
+                    }];
+                } else if ([item isKindOfClass:[AppStoreAccount class]]) {
+                    [arr addObject:[item toDictionary]];
+                } else if ([item isKindOfClass:[NSNumber class]] ||
+                           [item isKindOfClass:[NSString class]] ||
+                           [item isKindOfClass:[NSDictionary class]]) {
+                    [arr addObject:item];
+                }
+            }
+            serializable = arr;
+        }
+
+        // Only write if the object is plist-serializable.
+        if ([serializable isKindOfClass:[NSNumber class]] ||
+            [serializable isKindOfClass:[NSString class]] ||
+            [serializable isKindOfClass:[NSArray class]] ||
+            [serializable isKindOfClass:[NSDictionary class]] ||
+            [serializable isKindOfClass:[NSData class]]) {
+            resultDict[@"result"] = serializable;
+        } else {
+            resultDict[@"result"] = [NSString stringWithFormat:@"%@", serializable];
+        }
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:kGhostKitDir
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:nil];
+    [resultDict writeToFile:kResultFilePath atomically:YES];
 }
 
 #pragma mark - Keychain handlers
@@ -351,70 +522,57 @@ static NSString *const kNotifRestoreDefaultGraphics = @"GhostKitRestoreDefaultGr
     [self postResult:@(ok) forCommand:kNotifRestoreDefaultGraphics];
 }
 
-#pragma mark - Registration
+#pragma mark - Registration (Darwin notification center)
 
 - (void)registerObservers {
-    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    /*
+     * Use CFNotificationCenterGetDarwinNotifyCenter() for cross-process
+     * communication.  Darwin notifications work between the GhostKit App
+     * process and any process into which the Tweak is injected.
+     *
+     * Parameters are passed via a shared plist file because Darwin
+     * notifications cannot carry userInfo dictionaries.
+     */
+    CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
 
-    // Keychain
-    [center addObserver:self selector:@selector(handleCleanKeychain:)         name:kNotifCleanKeychain       object:nil];
-    [center addObserver:self selector:@selector(handleDeepCleanKeychain:)     name:kNotifDeepCleanKeychain   object:nil];
-    [center addObserver:self selector:@selector(handleDeleteAllKeychains:)    name:kNotifDeleteAllKeychains  object:nil];
-    [center addObserver:self selector:@selector(handleBackupKeychain:)       name:kNotifBackupKeychain      object:nil];
-    [center addObserver:self selector:@selector(handleRestoreKeychain:)       name:kNotifRestoreKeychain     object:nil];
-    [center addObserver:self selector:@selector(handleListKeychain:)          name:kNotifListKeychain        object:nil];
+    NSArray<NSString *> *allNames = @[
+        // Keychain
+        kNotifCleanKeychain, kNotifDeepCleanKeychain, kNotifDeleteAllKeychains,
+        kNotifBackupKeychain, kNotifRestoreKeychain, kNotifListKeychain,
+        // Identifier
+        kNotifRefreshIDFA, kNotifChangeIdentifier, kNotifGetCurrentIdentifiers,
+        // Device reset
+        kNotifResetDevice, kNotifGetDeviceInfo,
+        // Cache cleaner
+        kNotifCleanSystemResidue, kNotifCleanDatabaseCache, kNotifCleanDataDirectory,
+        kNotifCleanCookies, kNotifCleanPasteboard, kNotifGetAppSize,
+        // App list
+        kNotifGetAllApps, kNotifSearchApps, kNotifUninstallApp, kNotifGetAppInfo,
+        // Account
+        kNotifGetAccountList, kNotifAddAccount, kNotifDeleteAccount,
+        kNotifGetCurrentAccount, kNotifSwitchAccount,
+        // Permission
+        kNotifAllowPasteForAll, kNotifIsPasteAllowed,
+        // System
+        kNotifSafeExit, kNotifRespring, kNotifLdrestart,
+        // Injection
+        kNotifInjectDylib, kNotifRemoveDylib, kNotifGetInjectedDylibs,
+        // Graphics
+        kNotifApplyGraphicsConfig, kNotifGetAvailablePresets,
+        kNotifGetCurrentGraphics, kNotifRestoreDefaultGraphics,
+    ];
 
-    // Identifier
-    [center addObserver:self selector:@selector(handleRefreshIDFA:)           name:kNotifRefreshIDFA          object:nil];
-    [center addObserver:self selector:@selector(handleChangeIdentifier:)      name:kNotifChangeIdentifier     object:nil];
-    [center addObserver:self selector:@selector(handleGetCurrentIdentifiers:) name:kNotifGetCurrentIdentifiers object:nil];
+    for (NSString *name in allNames) {
+        CFNotificationCenterAddObserver(center,
+            (__bridge const void *)self,
+            ghostkit_darwin_callback,
+            (__bridge CFStringRef)name,
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
 
-    // Device reset
-    [center addObserver:self selector:@selector(handleResetDevice:)           name:kNotifResetDevice         object:nil];
-    [center addObserver:self selector:@selector(handleGetDeviceInfo:)         name:kNotifGetDeviceInfo       object:nil];
-
-    // Cache cleaner
-    [center addObserver:self selector:@selector(handleCleanSystemResidue:)    name:kNotifCleanSystemResidue  object:nil];
-    [center addObserver:self selector:@selector(handleCleanDatabaseCache:)    name:kNotifCleanDatabaseCache  object:nil];
-    [center addObserver:self selector:@selector(handleCleanDataDirectory:)    name:kNotifCleanDataDirectory  object:nil];
-    [center addObserver:self selector:@selector(handleCleanCookies:)          name:kNotifCleanCookies        object:nil];
-    [center addObserver:self selector:@selector(handleCleanPasteboard:)       name:kNotifCleanPasteboard     object:nil];
-    [center addObserver:self selector:@selector(handleGetAppSize:)             name:kNotifGetAppSize          object:nil];
-
-    // App list
-    [center addObserver:self selector:@selector(handleGetAllApps:)            name:kNotifGetAllApps          object:nil];
-    [center addObserver:self selector:@selector(handleSearchApps:)            name:kNotifSearchApps          object:nil];
-    [center addObserver:self selector:@selector(handleUninstallApp:)           name:kNotifUninstallApp        object:nil];
-    [center addObserver:self selector:@selector(handleGetAppInfo:)            name:kNotifGetAppInfo          object:nil];
-
-    // Account
-    [center addObserver:self selector:@selector(handleGetAccountList:)         name:kNotifGetAccountList      object:nil];
-    [center addObserver:self selector:@selector(handleAddAccount:)            name:kNotifAddAccount          object:nil];
-    [center addObserver:self selector:@selector(handleDeleteAccount:)         name:kNotifDeleteAccount       object:nil];
-    [center addObserver:self selector:@selector(handleGetCurrentAccount:)     name:kNotifGetCurrentAccount   object:nil];
-    [center addObserver:self selector:@selector(handleSwitchAccount:)          name:kNotifSwitchAccount        object:nil];
-
-    // Permission
-    [center addObserver:self selector:@selector(handleAllowPasteForAll:)      name:kNotifAllowPasteForAll    object:nil];
-    [center addObserver:self selector:@selector(handleIsPasteAllowed:)        name:kNotifIsPasteAllowed      object:nil];
-
-    // System
-    [center addObserver:self selector:@selector(handleSafeExit:)               name:kNotifSafeExit            object:nil];
-    [center addObserver:self selector:@selector(handleRespring:)              name:kNotifRespring             object:nil];
-    [center addObserver:self selector:@selector(handleLdrestart:)             name:kNotifLdrestart           object:nil];
-
-    // Injection
-    [center addObserver:self selector:@selector(handleInjectDylib:)           name:kNotifInjectDylib         object:nil];
-    [center addObserver:self selector:@selector(handleRemoveDylib:)           name:kNotifRemoveDylib         object:nil];
-    [center addObserver:self selector:@selector(handleGetInjectedDylibs:)     name:kNotifGetInjectedDylibs   object:nil];
-
-    // Graphics
-    [center addObserver:self selector:@selector(handleApplyGraphicsConfig:)     name:kNotifApplyGraphicsConfig  object:nil];
-    [center addObserver:self selector:@selector(handleGetAvailablePresets:)   name:kNotifGetAvailablePresets  object:nil];
-    [center addObserver:self selector:@selector(handleGetCurrentGraphics:)    name:kNotifGetCurrentGraphics  object:nil];
-    [center addObserver:self selector:@selector(handleRestoreDefaultGraphics:) name:kNotifRestoreDefaultGraphics object:nil];
-
-    NSLog(@"[GhostKit] All notification observers registered");
+    NSLog(@"[GhostKit] All Darwin notification observers registered (%lu)",
+          (unsigned long)allNames.count);
 }
 
 @end

@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <sys/types.h>
 
 /// Spawn a binary at `path` with given arguments via posix_spawn.
 /// Captures combined stdout+stderr into `output` buffer.
@@ -41,5 +42,23 @@ int spawn_simple(const char *path,
                   const char *args,
                   char *output,
                   int out_size);
+
+/// Spawn a binary with a specific persona (UID/GID).
+/// Used when the app needs to spawn processes that run as root
+/// or another user.  On iOS 17+, uses the persona spawn SPI.
+///
+/// @param path     Full path to the executable.
+/// @param argv     NULL-terminated array of C string arguments.
+/// @param uid      Target user ID.
+/// @param gid      Target group ID.
+/// @param output   Buffer to receive captured output.
+/// @param out_size Size of the output buffer.
+/// @return Exit status of the spawned process, or -1 on failure.
+int spawn_with_persona(const char *path,
+                        char *const argv[],
+                        uid_t uid,
+                        gid_t gid,
+                        char *output,
+                        int out_size);
 
 #endif /* SpawnBridge_h */

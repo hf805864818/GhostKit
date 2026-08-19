@@ -16,15 +16,31 @@
 extern char **environ;
 
 /// Get the path to a bundled tool binary.
-/// Tweak injects into the target app process, so tools are not in
-/// our own bundle. We search known TrollStore app paths.
+/// Instead of hardcoding a bundle ID prefix, we dynamically resolve
+/// the GhostKit app by reading our own bundle ID from the Tweak's
+/// load context.  This works regardless of what Bundle ID the app
+/// is installed under (e.g., after renaming to avoid detection).
 static NSString *toolPath(NSString *name) {
-    // Try multiple possible GhostKit app bundle locations
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    /*
+     * Strategy 1: Read the GhostKit app's bundle ID from the shared
+     * config file written by the App on first launch.
+     */
+    NSString *configPath = @"/var/mobile/Library/GhostKit/config.plist";
+    NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:configPath];
+    NSString *ghostKitBundleID = config[@"GhostKitBundleID"];
+
+    /*
+     * Strategy 2: If no config file, scan for an app that contains
+     * the RootHelper binary or insert_dylib tool, which are unique
+     * to GhostKit.  We also check for a "GhostKit" marker in Info.plist.
+     */
     NSArray *searchPaths = @[
         @"/var/containers/Bundle/Application",
         @"/Applications",
     ];
-    NSFileManager *fm = [NSFileManager defaultManager];
+
     for (NSString *searchDir in searchPaths) {
         NSArray *subdirs = [fm contentsOfDirectoryAtPath:searchDir error:nil];
         for (NSString *subdir in subdirs) {
@@ -36,8 +52,29 @@ static NSString *toolPath(NSString *name) {
                     NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
                     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
                     NSString *bid = info[@"CFBundleIdentifier"];
-                    // Match GhostKit app by bundle ID prefix
-                    if ([bid hasPrefix:@"apple.ghostkit"] || [bid hasPrefix:@"com.ghostkit"]) {
+
+                    // Check if this is the GhostKit app.
+                    BOOL isGhostKit = NO;
+
+                    // Match by configured bundle ID.
+                    if (ghostKitBundleID && bid &&
+                        [bid isEqualToString:ghostKitBundleID]) {
+                        isGhostKit = YES;
+                    }
+                    // Match by marker key in Info.plist.
+                    else if ([info[@"GhostKitApp"] boolValue]) {
+                        isGhostKit = YES;
+                    }
+                    // Match by presence of RootHelper binary.
+                    else {
+                        NSString *helperPath =
+                            [appPath stringByAppendingPathComponent:@"RootHelper"];
+                        if ([fm fileExistsAtPath:helperPath]) {
+                            isGhostKit = YES;
+                        }
+                    }
+
+                    if (isGhostKit) {
                         NSString *tool = [appPath stringByAppendingPathComponent:name];
                         if ([fm fileExistsAtPath:tool]) {
                             return tool;
@@ -47,6 +84,7 @@ static NSString *toolPath(NSString *name) {
             }
         }
     }
+
     // Fallback: assume tool is in PATH
     return name;
 }

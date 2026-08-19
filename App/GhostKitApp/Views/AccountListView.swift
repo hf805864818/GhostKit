@@ -90,10 +90,46 @@ final class AccountStore: ObservableObject {
     // MARK: - Detect current Apple ID from system
 
     func detectSystemAppleID() {
-        // Method 1: Read from MobileMeAccounts preference plist
-        let plistPath = "/var/mobile/Library/Preferences/MobileMeAccounts.plist"
-        if let dict = NSDictionary(contentsOfFile: plistPath) {
-            // The plist has an "Accounts" array with dictionary entries
+        // Method 1: Read from App Store preferences plist.
+        // com.apple.AppStore.plist contains the "AppleID" key for the
+        // currently signed-in App Store account.  This is distinct from
+        // the iCloud account stored in MobileMeAccounts.plist.
+        let appStorePrefsPath = "/var/mobile/Library/Preferences/com.apple.AppStore.plist"
+        if let dict = NSDictionary(contentsOfFile: appStorePrefsPath) {
+            if let appleID = dict["AppleID"] as? String, !appleID.isEmpty {
+                systemAppleID = appleID
+                return
+            }
+            // Some iOS versions use "SignedInAppleID" instead.
+            if let signedInID = dict["SignedInAppleID"] as? String, !signedInID.isEmpty {
+                systemAppleID = signedInID
+                return
+            }
+        }
+
+        // Method 2: Read from the accounts plist as a fallback.
+        // com.apple.accounts.plist may contain iTunes/App Store accounts.
+        let accountsPrefsPath = "/var/mobile/Library/Preferences/com.apple.accounts.plist"
+        if let dict = NSDictionary(contentsOfFile: accountsPrefsPath) {
+            if let accounts = dict["Accounts"] as? [String: [String: Any]] {
+                for (_, info) in accounts {
+                    let accountType = info["AccountType"] as? String ?? ""
+                    if accountType == "iTunesStore" || accountType.contains("AppleID") {
+                        if let appleID = info["AccountID"] as? String ??
+                                         info["AppleID"] as? String,
+                           !appleID.isEmpty {
+                            systemAppleID = appleID
+                            return
+                        }
+                    }
+                }
+            }
+        }
+
+        // Method 3: Read from MobileMeAccounts.plist (iCloud account).
+        // This is the iCloud Apple ID which may differ from the App Store ID.
+        let mobileMePath = "/var/mobile/Library/Preferences/MobileMeAccounts.plist"
+        if let dict = NSDictionary(contentsOfFile: mobileMePath) {
             if let accountsArray = dict["Accounts"] as? [[String: Any]] {
                 for accountDict in accountsArray {
                     if let accountID = accountDict["AccountID"] as? String,
@@ -102,7 +138,6 @@ final class AccountStore: ObservableObject {
                         return
                     }
                 }
-                // Fallback: first account's AccountID
                 if let first = accountsArray.first,
                    let accountID = first["AccountID"] as? String {
                     systemAppleID = accountID
@@ -111,36 +146,20 @@ final class AccountStore: ObservableObject {
             }
         }
 
-        // Method 2: Try reading from Accounts3.sqlite (requires full disk access)
-        let sqlitePath = "/var/mobile/Library/Accounts/Accounts3.sqlite"
-        if FileManager.default.fileExists(atPath: sqlitePath) {
-            // Try to extract Apple ID from the sqlite database
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: sqlitePath)) {
-                // Search for email pattern in the raw sqlite data
-                let rawString = String(data: data, encoding: .utf8) ?? ""
-                let emailPattern = #"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"#
-                if let regex = try? NSRegularExpression(pattern: emailPattern),
-                   let match = regex.firstMatch(in: rawString, range: NSRange(rawString.startIndex..., in: rawString)) {
-                    if let range = Range(match.range, in: rawString) {
-                        systemAppleID = String(rawString[range])
-                        return
-                    }
-                }
-            }
-        }
-
-        // Method 3: Try reading from keychain (app has apple keychain access group)
-        // Look for "com.apple.account.AppleID" in keychain
+        // Method 4: Try reading from keychain.
+        // Apple ID tokens are stored as generic passwords under the
+        // "com.apple.account" access group, not as internet passwords.
         let query: [String: Any] = [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: "appleid.apple.com",
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.apple.account.AppleID",
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecReturnAttributes as String: true,
         ]
         var result: AnyObject?
         if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
            let dict = result as? [String: Any],
-           let account = dict[kSecAttrAccount as String] as? String {
+           let account = dict[kSecAttrAccount as String] as? String,
+           !account.isEmpty {
             systemAppleID = account
             return
         }

@@ -14,6 +14,10 @@
 #import "PermissionManager.h"
 #import "AppListManager.h"
 #import <sqlite3.h>
+#import <spawn.h>
+#import <sys/wait.h>
+
+extern char **environ;
 
 static NSString *const kTCCDBPath = @"/var/mobile/Library/TCC/TCC.db";
 static NSString *const kPasteboardService = @"kTCCServicePasteboard";
@@ -29,6 +33,25 @@ static NSString *const kPasteboardService = @"kTCCServicePasteboard";
     return instance;
 }
 
+#pragma mark - tccd helpers
+
+/// Stop tccd so it releases the lock on TCC.db.
+/// Without this, sqlite3_open / sqlite3_exec fail because
+/// tccd holds a lock on the database file.
+- (void)stopTCCD {
+    pid_t pid = 0;
+    char *argv[] = { "killall", "-9", "tccd", NULL };
+    posix_spawnp(&pid, "killall", NULL, NULL, argv, environ);
+    usleep(300000);  // 0.3s
+}
+
+/// Restart tccd after database modifications.
+- (void)startTCCD {
+    pid_t pid = 0;
+    char *argv[] = { "launchctl", "start", "com.apple.tccd", NULL };
+    posix_spawnp(&pid, "launchctl", NULL, NULL, argv, environ);
+}
+
 #pragma mark - TCC helpers
 
 /// auth_value: 0 = denied, 2 = allowed, 3 = limited
@@ -39,11 +62,14 @@ static const int kClientTypeBundleID = 0;
 static const int kAuthReasonUserSet = 4;
 
 - (BOOL)executeSQL:(NSString *)sql withBindings:(NSArray *)bindings {
+    [self stopTCCD];
+
     sqlite3 *db = NULL;
     if (sqlite3_open_v2([kTCCDBPath UTF8String], &db,
                         SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
         NSLog(@"[GhostKit] Cannot open TCC.db: %s", sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
+        [self startTCCD];
         return NO;
     }
 
@@ -66,10 +92,13 @@ static const int kAuthReasonUserSet = 4;
     }
 
     sqlite3_close(db);
+    [self startTCCD];
     return success;
 }
 
 - (BOOL)grantPasteForBundleID:(NSString *)bundleID {
+    [self stopTCCD];
+
     // First try to delete any existing entry, then insert a fresh one.
     NSString *deleteSQL = @"DELETE FROM access WHERE service = ? AND client = ?;";
     [self executeSQL:deleteSQL withBindings:@[kPasteboardService, bundleID]];
@@ -86,6 +115,7 @@ static const int kAuthReasonUserSet = 4;
                         SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
         NSLog(@"[GhostKit] Cannot open TCC.db: %s", sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
+        [self startTCCD];
         return NO;
     }
 
@@ -126,6 +156,7 @@ static const int kAuthReasonUserSet = 4;
     }
 
     sqlite3_close(db);
+    [self startTCCD];
     return success;
 }
 
@@ -138,16 +169,77 @@ static const int kAuthReasonUserSet = 4;
         return NO;
     }
 
+    // Stop tccd once for the entire batch, then restart after.
+    [self stopTCCD];
+
     BOOL allSuccess = YES;
     NSUInteger count = 0;
 
     for (AppInfo *info in apps) {
-        if ([self grantPasteForBundleID:info.bundleID]) {
-            count++;
+        // Inline the grant logic to avoid stopping/starting tccd per app.
+        NSString *bundleID = info.bundleID;
+
+        // Delete existing entry.
+        NSString *deleteSQL = @"DELETE FROM access WHERE service = ? AND client = ?;";
+        // Use a local db handle to avoid recursion into executeSQL:.
+        sqlite3 *db = NULL;
+        if (sqlite3_open_v2([kTCCDBPath UTF8String], &db,
+                            SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+            sqlite3_stmt *delStmt = NULL;
+            if (sqlite3_prepare_v2(db, [deleteSQL UTF8String], -1, &delStmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(delStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(delStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_step(delStmt);
+                sqlite3_finalize(delStmt);
+            }
+
+            // Insert.
+            NSString *insertSQL =
+                @"INSERT OR REPLACE INTO access "
+                 "(service, client, client_type, auth_value, auth_reason, auth_version, "
+                 "  flags, TTL, TTL_type) "
+                 "VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0);";
+            sqlite3_stmt *insStmt = NULL;
+            if (sqlite3_prepare_v2(db, [insertSQL UTF8String], -1, &insStmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(insStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(insStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(insStmt, 3, kClientTypeBundleID);
+                sqlite3_bind_int(insStmt, 4, kAuthValueAllowed);
+                sqlite3_bind_int(insStmt, 5, kAuthReasonUserSet);
+                sqlite3_bind_int(insStmt, 6, 1);
+
+                if (sqlite3_step(insStmt) == SQLITE_DONE) {
+                    count++;
+                } else {
+                    allSuccess = NO;
+                }
+                sqlite3_finalize(insStmt);
+            } else {
+                // Try simpler schema.
+                NSString *simpleSQL =
+                    @"INSERT OR REPLACE INTO access (service, client, client_type, auth_value) "
+                     "VALUES (?, ?, ?, ?);";
+                sqlite3_stmt *simpleStmt = NULL;
+                if (sqlite3_prepare_v2(db, [simpleSQL UTF8String], -1, &simpleStmt, NULL) == SQLITE_OK) {
+                    sqlite3_bind_text(simpleStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(simpleStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_int(simpleStmt, 3, kClientTypeBundleID);
+                    sqlite3_bind_int(simpleStmt, 4, kAuthValueAllowed);
+                    if (sqlite3_step(simpleStmt) == SQLITE_DONE) count++;
+                    else allSuccess = NO;
+                    sqlite3_finalize(simpleStmt);
+                } else {
+                    allSuccess = NO;
+                }
+            }
+            sqlite3_close(db);
         } else {
             allSuccess = NO;
+            if (db) sqlite3_close(db);
         }
     }
+
+    [self startTCCD];
 
     NSLog(@"[GhostKit] allowPasteForAllApps: %lu / %lu granted",
           (unsigned long)count, (unsigned long)apps.count);
