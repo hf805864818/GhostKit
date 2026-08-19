@@ -111,6 +111,7 @@ jobs:
 
       # ── 自动提交 VERSION 和 CHANGELOG 更新 ─────────────
       - name: 💾 Commit VERSION & CHANGELOG
+        continue-on-error: true
         run: |
           VERSION="${{ steps.determine_version.outputs.version }}"
           IS_TAG="${{ steps.determine_version.outputs.is_tag }}"
@@ -128,8 +129,16 @@ jobs:
             echo "没有需要提交的变更"
           else
             git commit -m "chore(release): v${VERSION} [skip ci]"
-            git push origin HEAD:main
-            echo "已提交 VERSION 和 CHANGELOG 更新"
+            # 重试推送（可能有其他 workflow 同时推送）
+            for i in 1 2 3; do
+              git pull --rebase origin main 2>/dev/null || true
+              if git push origin HEAD:main 2>/dev/null; then
+                echo "已提交 VERSION 和 CHANGELOG 更新"
+                break
+              fi
+              echo "推送重试 ${i}..."
+              sleep 5
+            done
           fi
 
   # ===========================================================================
