@@ -46,14 +46,10 @@ extern char **environ;
 
     int spawnResult = posix_spawnp(&pid, "killall", NULL, NULL, argv, environ);
     if (spawnResult != 0) {
-        // Fallback to system().
-        system("killall -9 SpringBoard");
+        // Fallback: try sbreload (system() is unavailable in the iOS SDK).
+        char *sbArgv[] = { "sbreload", NULL };
+        posix_spawnp(&pid, "sbreload", NULL, NULL, sbArgv, environ);
     }
-
-    // If that did not work (e.g., binary not found), try sbreload.
-    // The above call replaces the process image indirectly via killall,
-    // so this fallback only runs if killall is missing.
-    system("sbreload 2>/dev/null");
 }
 
 #pragma mark - ldrestart
@@ -67,8 +63,9 @@ extern char **environ;
 
     int spawnResult = posix_spawnp(&pid, "ldrestart", NULL, NULL, argv, environ);
     if (spawnResult != 0) {
-        // Fallback: kill SpringBoard and backboardd.
-        system("killall -9 backboardd SpringBoard");
+        // Fallback: kill SpringBoard and backboardd (system() is unavailable in the iOS SDK).
+        char *killArgv[] = { "killall", "-9", "backboardd", "SpringBoard", NULL };
+        posix_spawnp(&pid, "killall", NULL, NULL, killArgv, environ);
     }
 }
 

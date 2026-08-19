@@ -6,7 +6,9 @@
 #import "AccountManager.h"
 #import "SystemManager.h"
 #import <UIKit/UIKit.h>
-#import <stdlib.h>
+#import <spawn.h>
+
+extern char **environ;
 
 static NSString *const kAccountListPlist = @"/var/mobile/Library/GhostKit/appstore_accounts.plist";
 static NSString *const kAccountListDir   = @"/var/mobile/Library/GhostKit";
@@ -230,8 +232,15 @@ static NSString *const kAccountStorePrefsPath =
     //    (This is handled by the keychain manager separately.)
 
     // 4. Kill the App Store process so it reloads preferences.
-    system("killall AppStore 2>/dev/null");
-    system("killall -9 AppStore 2>/dev/null");
+    //    system() is unavailable in the iOS SDK; use posix_spawnp instead.
+    {
+        pid_t pid = 0;
+        char *argv1[] = { "killall", "AppStore", NULL };
+        posix_spawnp(&pid, "killall", NULL, NULL, argv1, environ);
+
+        char *argv2[] = { "killall", "-9", "AppStore", NULL };
+        posix_spawnp(&pid, "killall", NULL, NULL, argv2, environ);
+    }
 
     NSLog(@"[GhostKit] switchAccount to %@ -> %@", account.appleID, ok ? @"YES" : @"NO");
     return ok;

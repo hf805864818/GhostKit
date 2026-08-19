@@ -10,7 +10,47 @@
 #import "InjectionManager.h"
 #import "AppListManager.h"
 #import <mach-o/loader.h>
-#import <stdlib.h>
+#import <spawn.h>
+#import <sys/wait.h>
+
+extern char **environ;
+
+/// Run a command with arguments via posix_spawnp, returning the exit code.
+/// Replaces system() which is unavailable in the iOS SDK.
+static int runSpawnCommand(NSString *cmd, NSArray<NSString *> *args) {
+    if (!cmd || cmd.length == 0) {
+        return -1;
+    }
+
+    NSUInteger argc = args.count + 2;  // cmd + args + NULL
+    const char **cArgv = calloc(argc, sizeof(const char *));
+    if (!cArgv) {
+        return -1;
+    }
+
+    cArgv[0] = [cmd UTF8String];
+    for (NSUInteger i = 0; i < args.count; i++) {
+        cArgv[i + 1] = [args[i] UTF8String];
+    }
+    cArgv[args.count + 1] = NULL;
+
+    pid_t pid = 0;
+    int spawnResult = posix_spawnp(&pid, [cmd UTF8String], NULL, NULL,
+                                   (char *const *)cArgv, environ);
+    free(cArgv);
+
+    if (spawnResult != 0) {
+        return spawnResult;
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return -1;
+}
 
 @implementation InjectionManager
 
@@ -94,24 +134,19 @@
         if ([existing isEqualToString:loadPath] || [existing containsString:dylibName]) {
             NSLog(@"[GhostKit] Dylib %@ already injected in %@", dylibName, bundleID);
             // Still re-sign to be safe.
-            system([[NSString stringWithFormat:@"ldid -S '%@'", execPath] UTF8String]);
+            runSpawnCommand(@"ldid", @[@"-S", execPath]);
             return YES;
         }
     }
 
     // 4. Use insert_dylib to add the LC_LOAD_DYLIB load command.
-    NSString *command = [NSString stringWithFormat:
-        @"insert_dylib --inplace '%@' '%@' 2>&1", loadPath, execPath];
-
     // Try insert_dylib first.
-    int ret = system([command UTF8String]);
+    int ret = runSpawnCommand(@"insert_dylib", @[@"--inplace", loadPath, execPath]);
     if (ret != 0) {
         NSLog(@"[GhostKit] insert_dylib failed (code %d), trying optool...", ret);
 
         // Fallback: optool
-        NSString *optoolCommand = [NSString stringWithFormat:
-            @"optool install -c load -p '%@' -t '%@' 2>&1", loadPath, execPath];
-        ret = system([optoolCommand UTF8String]);
+        ret = runSpawnCommand(@"optool", @[@"install", @"-c", @"load", @"-p", loadPath, @"-t", execPath]);
         if (ret != 0) {
             NSLog(@"[GhostKit] optool also failed (code %d)", ret);
             // Try manual restoration of backup.
@@ -122,8 +157,8 @@
     }
 
     // 5. Re-sign the binary and the dylib with ldid.
-    system([[NSString stringWithFormat:@"ldid -S '%@'", execPath] UTF8String]);
-    system([[NSString stringWithFormat:@"ldid -S '%@'", destDylibPath] UTF8String]);
+    runSpawnCommand(@"ldid", @[@"-S", execPath]);
+    runSpawnCommand(@"ldid", @[@"-S", destDylibPath]);
 
     NSLog(@"[GhostKit] injectDylib:%@ forBundleID:%@ -> YES", dylibName, bundleID);
     return YES;
@@ -160,9 +195,7 @@
     } else {
         // No backup available; try optool uninstall.
         NSString *loadPath = [NSString stringWithFormat:@"@executable_path/%@", dylibName];
-        NSString *command = [NSString stringWithFormat:
-            @"optool uninstall -c load -p '%@' -t '%@' 2>&1", loadPath, execPath];
-        system([command UTF8String]);
+        runSpawnCommand(@"optool", @[@"uninstall", @"-c", @"load", @"-p", loadPath, @"-t", execPath]);
     }
 
     // 2. Remove the dylib from the bundle.
@@ -171,7 +204,7 @@
     }
 
     // 3. Re-sign.
-    system([[NSString stringWithFormat:@"ldid -S '%@'", execPath] UTF8String]);
+    runSpawnCommand(@"ldid", @[@"-S", execPath]);
 
     NSLog(@"[GhostKit] removeDylib:%@ forBundleID:%@ -> YES", dylibName, bundleID);
     return YES;
