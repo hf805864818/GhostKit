@@ -2,6 +2,20 @@
 
 所有显著变更都会记录在此文件中。
 
+## v1.0.16 - 2026-08-19
+
+### ✨ 新功能
+- (无)
+
+### 🐛 问题修复
+- (无)
+
+### 📦 其他变更
+- [0;32m[INFO][0m 获取提交记录范围: v1.0.14..HEAD
+- Fix Tweak.x build error: const void* -> void* for CFNotificationCallback
+- chore(release): v1.0.15 [skip ci]
+- Fix all 11 identified issues
+
 ## v1.0.15 - 2026-08-19
 
 ### ✨ 新功能
