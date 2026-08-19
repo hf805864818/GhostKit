@@ -25,8 +25,68 @@
 #include <fts.h>
 #include <stdarg.h>
 #include <fts.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 extern char **environ;
+
+/* ── run_shell: replacement for system() using posix_spawn ────────────── */
+static int run_shell(const char *cmd) {
+    if (!cmd || !*cmd) return -1;
+
+    char *argv[] = { "/bin/sh", "-c", (char *)cmd, NULL };
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ);
+    if (rc != 0) return -1;
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* ── run_shell_capture: like popen() but using posix_spawn ─────────────── */
+static int run_shell_capture(const char *cmd, char *output, int out_size) {
+    if (!cmd || !*cmd || !output || out_size <= 0) return -1;
+    output[0] = '\0';
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return -1;
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+    posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+
+    char *argv[] = { "/bin/sh", "-c", (char *)cmd, NULL };
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, "/bin/sh", &actions, NULL, argv, environ);
+
+    posix_spawn_file_actions_destroy(&actions);
+
+    if (rc != 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    close(pipefd[1]);
+
+    int total = 0;
+    ssize_t n;
+    while ((n = read(pipefd[0], output + total, out_size - total - 1)) > 0) {
+        total += (int)n;
+        if (total >= out_size - 1) break;
+    }
+    output[total] = '\0';
+
+    close(pipefd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
 
 /* ===========================================================================
  * Internal helpers
@@ -551,7 +611,7 @@ static int find_data_container(const char *bundleID, char *out_path, size_t out_
         snprintf(cmd, sizeof(cmd),
                  "/usr/bin/plutil -p '%s' 2>/dev/null | grep -q '%s'",
                  meta_path, bundleID);
-        if (system(cmd) == 0) {
+        if (run_shell(cmd) == 0) {
             snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
             found = 1;
             break;
@@ -810,18 +870,14 @@ int allow_paste_all(void) {
                 snprintf(info_path, sizeof(info_path), "%s/%s/Info.plist",
                          app_dir, app_entry->d_name);
 
-                /* Extract CFBundleIdentifier using plutil. */
+                /* Extract CFBundleIdentifier using plutil via run_shell_capture. */
                 char cmd[MAX_CMD_LEN];
                 snprintf(cmd, sizeof(cmd),
                          "/usr/bin/plutil -extract CFBundleIdentifier raw '%s' 2>/dev/null",
                          info_path);
 
-                FILE *pipe = popen(cmd, "r");
-                if (pipe == NULL) {
-                    continue;
-                }
                 char bundle_id[512] = {0};
-                if (fgets(bundle_id, sizeof(bundle_id), pipe) != NULL) {
+                if (run_shell_capture(cmd, bundle_id, sizeof(bundle_id)) >= 0) {
                     /* Strip trailing newline / quotes. */
                     size_t len = strlen(bundle_id);
                     while (len > 0 && (bundle_id[len-1] == '\n' ||
@@ -852,7 +908,6 @@ int allow_paste_all(void) {
                         }
                     }
                 }
-                pclose(pipe);
             }
             closedir(appdir);
         }
@@ -939,12 +994,12 @@ int uninstall_app(const char *bundleID) {
     snprintf(cmd, sizeof(cmd),
              "/usr/bin/find /private/var/containers/Bundle/Application "
              "-name '%s.app' -exec rm -rf {} + 2>/dev/null", bundleID);
-    system(cmd);
+    run_shell(cmd);
 
     snprintf(cmd, sizeof(cmd),
              "/usr/bin/find /Applications -name '%s.app' -maxdepth 1 "
              "-exec rm -rf {} + 2>/dev/null", bundleID);
-    system(cmd);
+    run_shell(cmd);
 
     /* Remove data container. */
     char container[MAX_CMD_LEN];
@@ -958,7 +1013,7 @@ int uninstall_app(const char *bundleID) {
              "-name '.com.apple.mobile_container_manager' "
              "-exec grep -l '%s' {} \\; -exec rm -rf $(dirname {}) \\; 2>/dev/null",
              bundleID);
-    system(cmd);
+    run_shell(cmd);
 
     /* Remove plugin containers. */
     snprintf(cmd, sizeof(cmd),
@@ -966,7 +1021,7 @@ int uninstall_app(const char *bundleID) {
              "-name '.com.apple.mobile_container_manager' "
              "-exec grep -l '%s' {} \\; -exec rm -rf $(dirname {}) \\; 2>/dev/null",
              bundleID);
-    system(cmd);
+    run_shell(cmd);
 
     /* Remove the preferences plist. */
     snprintf(cmd, sizeof(cmd),

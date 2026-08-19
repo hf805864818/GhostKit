@@ -158,7 +158,7 @@ struct AccountListView: View {
                 Section("添加账号") {
                     TextField("Apple ID", text: $newAppleID)
                         .keyboardType(.emailAddress)
-                        .autocapitalization(.none)
+                        .textInputAutocapitalization(.never)
                     SecureField("密码", text: $newPassword)
                     Picker("地区", selection: $newRegion) {
                         Text("中国").tag("中国")

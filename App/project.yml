@@ -29,18 +29,16 @@ targets:
           - "RootHelper/RootHelper.h"
           - "Managers/SpawnBridge.c"
           - "Managers/SpawnBridge.h"
-      - path: GhostKitApp/RootHelper/RootHelper.c
-        type: file
-        buildPhase: sources
-        compilerFlags:
-          - "-x"
-          - "c"
       - path: GhostKitApp/Managers/SpawnBridge.c
         type: file
         buildPhase: sources
         compilerFlags:
           - "-x"
           - "c"
+    dependencies:
+      - sdk: AdSupport.framework
+      - sdk: CoreFoundation.framework
+      - sdk: MobileCoreServices.framework
     resources:
       - GhostKitApp/en.lproj
       - GhostKitApp/zh-Hans.lproj
@@ -79,3 +77,30 @@ targets:
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/GhostKitApp/RootHelper
           - $(SRCROOT)/GhostKitApp/Managers
+    postBuildScripts:
+      - name: Build RootHelper Binary
+        script: |
+          set -e
+          ROOTHELPER_SRC="${SRCROOT}/GhostKitApp/RootHelper/RootHelper.c"
+          APP_BUNDLE="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app"
+          ROOTHELPER_OUT="${APP_BUNDLE}/RootHelper"
+
+          echo " Compiling RootHelper binary..."
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun -sdk iphoneos cc \
+              -arch arm64 \
+              -isysroot "${SDK_PATH}" \
+              -o "${ROOTHELPER_OUT}" \
+              "${ROOTHELPER_SRC}" \
+              -lsqlite3 \
+              -framework Foundation \
+              -framework CoreFoundation
+
+          chmod 755 "${ROOTHELPER_OUT}"
+          echo " RootHelper binary built at: ${ROOTHELPER_OUT}"
+
+          # Fakesign with ldid if available (needed for TrollStore)
+          if command -v ldid &> /dev/null; then
+              ldid -S "${ROOTHELPER_OUT}"
+              echo " RootHelper fakesigned with ldid"
+          fi
