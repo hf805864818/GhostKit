@@ -62,7 +62,7 @@ static NSString *const kResultFilePath   = @"/var/mobile/Library/GhostKit/result
         usleep(50000); // 50ms
     }
     NSLog(@"[GhostKit] Darwin notify timeout for command %ld", (long)command);
-    return nil;
+    return DarwinCommandUnknown;
 }
 
 - (void)postNotification:(DarwinCommand)command params:(nullable NSDictionary *)params {
@@ -117,7 +117,7 @@ static NSString *const kResultFilePath   = @"/var/mobile/Library/GhostKit/result
     if ([name isEqualToString:@"GhostKitGetCurrentGraphics"])       return DarwinCommandGetCurrentGraphics;
     if ([name isEqualToString:@"GhostKitRestoreDefaultGraphics"])   return DarwinCommandRestoreDefaultGraphics;
     if ([name isEqualToString:@"GhostKitShowSettings"])             return DarwinCommandShowSettings;
-    return nil;
+    return DarwinCommandUnknown;
 }
 
 + (NSString *)notificationNameForCommand:(DarwinCommand)command {

@@ -51,6 +51,7 @@ typedef NS_ENUM(NSInteger, DarwinCommand) {
     DarwinCommandGetCurrentGraphics,
     DarwinCommandRestoreDefaultGraphics,
     DarwinCommandShowSettings,
+    DarwinCommandUnknown = -1
 };
 
 @interface DarwinNotifyManager : NSObject
@@ -67,7 +68,7 @@ typedef NS_ENUM(NSInteger, DarwinCommand) {
                 params:(nullable NSDictionary *)params;
 
 /// Check if a Darwin command name corresponds to a known GhostKit command.
-+ (nullable DarwinCommand)commandFromString:(NSString *)name;
++ (DarwinCommand)commandFromString:(NSString *)name;
 
 /// Convert a command to its Darwin notification string.
 + (NSString *)notificationNameForCommand:(DarwinCommand)command;
