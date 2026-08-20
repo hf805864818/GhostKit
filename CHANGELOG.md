@@ -2,6 +2,23 @@
 
 所有显著变更都会记录在此文件中。
 
+## v1.0.20 - 2026-08-20
+
+### ✨ 新功能
+- (无)
+
+### 🐛 问题修复
+- 添加 DarwinNotifyManager.m 到 Makefile
+- 从源码编译 RootHelper 为 64-bit arm64e
+- 简化 RootHelper 构建流程，修复 CI 编译失败
+- 修复 RootHelper 32-bit 架构问题，添加 3指长按悬浮面板，修复 iOS 16+ Apple ID 检测
+
+### 📦 其他变更
+- [0;32m[INFO][0m 获取提交记录范围: v1.0.16..HEAD
+- chore(release): v1.0.19 [skip ci]
+- chore(release): v1.0.18 [skip ci]
+- chore(release): v1.0.17 [skip ci]
+
 ## v1.0.19 - 2026-08-20
 
 ### ✨ 新功能
