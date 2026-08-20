@@ -16,10 +16,13 @@ GhostKit_FILES = \
     Modules/PermissionManager.m \
     Modules/SystemManager.m \
     Modules/InjectionManager.m \
-    Modules/GraphicsConfigManager.m
+    Modules/GraphicsConfigManager.m \
+    Modules/OverlayController.m \
+    Modules/GhostKitSettingsViewController.m \
+    Modules/GhostKitFeatureButtonsViewController.m
 
 GhostKit_CFLAGS = -fobjc-arc -IModules -Wno-unused-variable -Wno-unused-function
-GhostKit_FRAMEWORKS = UIKit Security Foundation AdSupport
+GhostKit_FRAMEWORKS = UIKit Security Foundation AdSupport CoreFoundation
 GhostKit_PRIVATE_FRAMEWORKS = SpringBoardServices MobileContainerManager AppSupport
 GhostKit_LIBRARIES = sqlite3
 

@@ -453,13 +453,26 @@ jobs:
               fi
               echo " Main binary verified: ${APP_PATH}/${MAIN_BIN}"
 
-              # Verify RootHelper binary exists
+              # Verify RootHelper binary exists and is 64-bit
               if [ ! -f "${APP_PATH}/RootHelper" ]; then
                   echo " ERROR: RootHelper binary not found in app bundle!"
                   echo " This usually means the postBuildScript failed."
                   echo " App bundle contents:"
                   ls -la "${APP_PATH}/"
                   exit 1
+              fi
+              # Check architecture
+              MAGIC=$(xxd -p -l 4 "${APP_PATH}/RootHelper" 2>/dev/null || echo "")
+              if [ "$MAGIC" = "cffaedfe" ]; then
+                  echo " ERROR: RootHelper is 32-bit ARM! Must be compiled as 64-bit arm64e"
+                  exit 1
+              elif [ "$MAGIC" = "feeadfeb" ]; then
+                  echo " ERROR: RootHelper is 32-bit (wrong endianness)"
+                  exit 1
+              elif [ "$MAGIC" != "cafebabe" ]; then
+                  echo " WARNING: RootHelper has unknown architecture: $MAGIC"
+              else
+                  echo " RootHelper is 64-bit ARM ✓"
               fi
               echo " RootHelper binary verified: ${APP_PATH}/RootHelper"
           fi
@@ -515,14 +528,20 @@ jobs:
             fi
             # Sign dylibs without entitlements
             find Payload -name "*.dylib" -exec ldid -S {} \; 2>/dev/null || true
-            # RootHelper: sign WITH entitlements (same as main binary)
+            # RootHelper: verify and sign WITH entitlements
             # Without entitlements, AMFI denies posix_spawn execution
-            if [ -f "${ENTITLEMENTS}" ]; then
-              find Payload -name "RootHelper" -type f -exec chmod 755 {} \; -exec ldid -S"${ENTITLEMENTS}" {} \; 2>&1 || \
-                find Payload -name "RootHelper" -type f -exec ldid -S {} \; 2>&1
-              echo "RootHelper signed with entitlements"
+            ROOTHELPER_PATH=$(find Payload -name "RootHelper" -type f 2>/dev/null | head -n 1)
+            if [ -n "${ROOTHELPER_PATH}" ]; then
+                chmod 755 "${ROOTHELPER_PATH}"
+                if [ -f "${ENTITLEMENTS}" ]; then
+                    ldid -S"${ENTITLEMENTS}" "${ROOTHELPER_PATH}" 2>&1 && \
+                        echo "RootHelper signed with entitlements ✓" || \
+                        echo " WARNING: RootHelper signing failed"
+                else
+                    ldid -S "${ROOTHELPER_PATH}" 2>&1 || true
+                fi
             else
-              find Payload -name "RootHelper" -type f -exec chmod 755 {} \; -exec ldid -S {} \; 2>&1
+                echo " WARNING: RootHelper not found in Payload"
             fi
             # Fakesign bundled tool binaries
             for tool in ldid insert_dylib ct_bypass trollstorehelper; do

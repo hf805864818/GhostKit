@@ -10,6 +10,8 @@
 
 import SwiftUI
 import Foundation
+import Security
+import CoreFoundation
 
 // MARK: - Account model
 
@@ -44,7 +46,6 @@ final class AccountStore: ObservableObject {
     private let fileURL: URL
 
     private init() {
-        // Store accounts in the app's documents directory
         let docsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         self.fileURL = docsDir.appendingPathComponent("ghostkit_accounts.json")
@@ -87,36 +88,71 @@ final class AccountStore: ObservableObject {
         saveAccounts()
     }
 
-    // MARK: - Detect current Apple ID from system
+    // MARK: - Detect current Apple ID from system (FIXED for iOS 16+)
 
     func detectSystemAppleID() {
-        // Method 1: Read from App Store preferences plist.
-        // com.apple.AppStore.plist contains the "AppleID" key for the
-        // currently signed-in App Store account.  This is distinct from
-        // the iCloud account stored in MobileMeAccounts.plist.
+        // Method 1: Query Keychain with correct iOS 16+ access groups
+        // iOS 16+ stores Apple ID tokens in multiple access groups
+        let keychainQueries: [[String: Any]] = [
+            // Primary: iTunes Store account
+            [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "com.apple.iTunesStore",
+                kSecMatchLimit as String: kSecMatchLimitOne,
+                kSecReturnAttributes as String: true,
+            ],
+            // Secondary: Apple ID account
+            [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "com.apple.account.AppleID",
+                kSecMatchLimit as String: kSecMatchLimitOne,
+                kSecReturnAttributes as String: true,
+            ],
+            // Tertiary: MobileMe account (iCloud)
+            [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "com.apple.mobileme",
+                kSecMatchLimit as String: kSecMatchLimitOne,
+                kSecReturnAttributes as String: true,
+            ],
+        ]
+
+        for query in keychainQueries {
+            var result: AnyObject?
+            if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+               let dict = result as? [String: Any],
+               let account = dict[kSecAttrAccount as String] as? String,
+               !account.isEmpty {
+                // Filter out system-generated accounts
+                if !account.contains("com.apple.") && !account.contains("FAE") {
+                    systemAppleID = account
+                    print("[GhostKit] Detected Apple ID from Keychain: \(account)")
+                    return
+                }
+            }
+        }
+
+        // Method 2: Read from App Store preferences plist (fallback)
         let appStorePrefsPath = "/var/mobile/Library/Preferences/com.apple.AppStore.plist"
         if let dict = NSDictionary(contentsOfFile: appStorePrefsPath) {
             if let appleID = dict["AppleID"] as? String, !appleID.isEmpty {
                 systemAppleID = appleID
                 return
             }
-            // Some iOS versions use "SignedInAppleID" instead.
             if let signedInID = dict["SignedInAppleID"] as? String, !signedInID.isEmpty {
                 systemAppleID = signedInID
                 return
             }
         }
 
-        // Method 2: Read from the accounts plist as a fallback.
-        // com.apple.accounts.plist may contain iTunes/App Store accounts.
+        // Method 3: Read from accounts plist (fallback)
         let accountsPrefsPath = "/var/mobile/Library/Preferences/com.apple.accounts.plist"
         if let dict = NSDictionary(contentsOfFile: accountsPrefsPath) {
             if let accounts = dict["Accounts"] as? [String: [String: Any]] {
                 for (_, info) in accounts {
                     let accountType = info["AccountType"] as? String ?? ""
                     if accountType == "iTunesStore" || accountType.contains("AppleID") {
-                        if let appleID = info["AccountID"] as? String ??
-                                         info["AppleID"] as? String,
+                        if let appleID = info["AccountID"] as? String ?? info["AppleID"] as? String,
                            !appleID.isEmpty {
                             systemAppleID = appleID
                             return
@@ -126,8 +162,7 @@ final class AccountStore: ObservableObject {
             }
         }
 
-        // Method 3: Read from MobileMeAccounts.plist (iCloud account).
-        // This is the iCloud Apple ID which may differ from the App Store ID.
+        // Method 4: Read from MobileMeAccounts.plist (iCloud account)
         let mobileMePath = "/var/mobile/Library/Preferences/MobileMeAccounts.plist"
         if let dict = NSDictionary(contentsOfFile: mobileMePath) {
             if let accountsArray = dict["Accounts"] as? [[String: Any]] {
@@ -144,24 +179,6 @@ final class AccountStore: ObservableObject {
                     return
                 }
             }
-        }
-
-        // Method 4: Try reading from keychain.
-        // Apple ID tokens are stored as generic passwords under the
-        // "com.apple.account" access group, not as internet passwords.
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.apple.account.AppleID",
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnAttributes as String: true,
-        ]
-        var result: AnyObject?
-        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-           let dict = result as? [String: Any],
-           let account = dict[kSecAttrAccount as String] as? String,
-           !account.isEmpty {
-            systemAppleID = account
-            return
         }
 
         systemAppleID = nil

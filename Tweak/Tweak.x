@@ -27,6 +27,7 @@
 #import "Modules/SystemManager.h"
 #import "Modules/InjectionManager.h"
 #import "Modules/GraphicsConfigManager.h"
+#import "Modules/OverlayController.h"
 
 // ---------------------------------------------------------------------------
 // Shared file paths for cross-process parameter / result passing
@@ -89,6 +90,8 @@ static NSString *const kNotifApplyGraphicsConfig   = @"GhostKitApplyGraphicsConf
 static NSString *const kNotifGetAvailablePresets   = @"GhostKitGetAvailablePresets";
 static NSString *const kNotifGetCurrentGraphics    = @"GhostKitGetCurrentGraphics";
 static NSString *const kNotifRestoreDefaultGraphics = @"GhostKitRestoreDefaultGraphics";
+
+static NSString *const kNotifShowSettings = @"GhostKitShowSettings";
 
 // ---------------------------------------------------------------------------
 // GhostKitObserver - receives Darwin notifications and dispatches to handlers
@@ -180,6 +183,7 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
             kNotifGetAvailablePresets:     NSStringFromSelector(@selector(handleGetAvailablePresets:)),
             kNotifGetCurrentGraphics:      NSStringFromSelector(@selector(handleGetCurrentGraphics:)),
             kNotifRestoreDefaultGraphics:  NSStringFromSelector(@selector(handleRestoreDefaultGraphics:)),
+            kNotifShowSettings:        NSStringFromSelector(@selector(handleShowSettings:)),
         };
     });
 
@@ -522,6 +526,11 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
     [self postResult:@(ok) forCommand:kNotifRestoreDefaultGraphics];
 }
 
+- (void)handleShowSettings:(NSNotification *)note {
+    [OverlayController.sharedInstance showSettings];
+    [self postResult:@(YES) forCommand:kNotifShowSettings];
+}
+
 #pragma mark - Registration (Darwin notification center)
 
 - (void)registerObservers {
@@ -560,6 +569,7 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
         // Graphics
         kNotifApplyGraphicsConfig, kNotifGetAvailablePresets,
         kNotifGetCurrentGraphics, kNotifRestoreDefaultGraphics,
+        kNotifShowSettings,
     ];
 
     for (NSString *name in allNames) {
