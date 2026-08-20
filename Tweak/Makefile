@@ -17,6 +17,7 @@ GhostKit_FILES = \
     Modules/SystemManager.m \
     Modules/InjectionManager.m \
     Modules/GraphicsConfigManager.m \
+    Modules/DarwinNotifyManager.m \
     Modules/OverlayController.m \
     Modules/GhostKitSettingsViewController.m \
     Modules/GhostKitFeatureButtonsViewController.m
