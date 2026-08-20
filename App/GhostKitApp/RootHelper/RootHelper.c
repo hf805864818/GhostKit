@@ -24,9 +24,9 @@
 #include <sqlite3.h>
 #include <fts.h>
 #include <stdarg.h>
-#include <fts.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 extern char **environ;
 
@@ -431,7 +431,7 @@ int deep_clean_keychain(const char *bundleID) {
     run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
 
     LOG_OK("deep_clean_keychain done for '%s'", bundleID);
-    return errors == 0 ? 0 : 0;
+    return errors == 0 ? 0 : -1;
 }
 
 int delete_all_keychains(void) {
@@ -556,20 +556,37 @@ int reset_idfa(void) {
 int clean_system(void) {
     LOG("clean_system");
 
-    /* Clean /tmp */
-    run_simple("/bin/rm", "-rf", "/tmp/*", NULL);
-    run_simple("/bin/rm", "-rf", "/tmp/.*", NULL);
+    /* Clean /tmp (delete contents, preserve the directory itself) */
+    remove_directory_tree("/tmp");
+    mkdir("/tmp", 01777);
 
     /* Clean /var/tmp */
-    run_simple("/bin/rm", "-rf", "/private/var/tmp/*", NULL);
+    remove_directory_tree("/private/var/tmp");
+    mkdir("/private/var/tmp", 01777);
 
     /* Clean mobile caches */
     remove_directory_tree("/private/var/mobile/Library/Caches/Snapshots");
     remove_directory_tree("/private/var/mobile/Library/Caches/com.apple.appstore");
     remove_directory_tree("/private/var/mobile/Library/Caches/com.apple.itunescloudd");
 
-    /* Clean system logs */
-    run_simple("/bin/rm", "-rf", "/private/var/log/*.log", NULL);
+    /* Clean system log files (individual known paths) */
+    const char *log_files[] = {
+        "/private/var/log/system.log",
+        "/private/var/log/system.log.0",
+        "/private/var/log/asl",
+        "/private/var/log/DiagnosticMessages",
+    };
+    int log_count = sizeof(log_files) / sizeof(log_files[0]);
+    for (int i = 0; i < log_count; i++) {
+        struct stat st;
+        if (stat(log_files[i], &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                remove_directory_tree(log_files[i]);
+            } else {
+                unlink(log_files[i]);
+            }
+        }
+    }
 
     /* Clean diagnostic logs */
     remove_directory_tree("/private/var/mobile/Library/Logs/CrashReporter/DiagnosticLogs");
@@ -579,6 +596,63 @@ int clean_system(void) {
 
     LOG_OK("clean_system done");
     return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * Binary plist helper (uses CoreFoundation, works on iOS without plutil)
+ * ------------------------------------------------------------------------ */
+
+/* Read a string value from a binary plist by key.
+ * Returns 0 on success, -1 on failure.  Caller must free *out_value on success. */
+static int read_plist_string(const char *plist_path, const char *key, char **out_value) {
+    if (plist_path == NULL || key == NULL || out_value == NULL) return -1;
+    *out_value = NULL;
+
+    CFStringRef cfKey = CFStringCreateWithCString(NULL, key, kCFStringEncodingUTF8);
+    if (cfKey == NULL) return -1;
+
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL,
+        (const UInt8 *)plist_path, strlen(plist_path), false);
+    if (url == NULL) { CFRelease(cfKey); return -1; }
+
+    CFReadStreamRef stream = CFReadStreamCreateWithFile(NULL, url);
+    CFRelease(url);
+    if (stream == NULL) { CFRelease(cfKey); return -1; }
+
+    if (!CFReadStreamOpen(stream)) {
+        CFRelease(stream); CFRelease(cfKey); return -1;
+    }
+
+    CFPropertyListRef plist = CFPropertyListCreateWithStream(
+        NULL, stream, 0, kCFPropertyListImmutable, NULL, NULL);
+    CFReadStreamClose(stream);
+    CFRelease(stream);
+
+    if (plist == NULL) { CFRelease(cfKey); return -1; }
+
+    int result = -1;
+    if (CFGetTypeID(plist) == CFDictionaryGetTypeID()) {
+        CFDictionaryRef dict = (CFDictionaryRef)plist;
+        CFTypeRef value = CFDictionaryGetValue(dict, cfKey);
+        if (value != NULL && CFGetTypeID(value) == CFStringGetTypeID()) {
+            CFStringRef cfStr = (CFStringRef)value;
+            CFIndex len = CFStringGetLength(cfStr);
+            CFIndex maxBuf = CFStringGetMaximumSizeForEncoding(len, kCFStringEncodingUTF8) + 1;
+            char *buf = (char *)malloc((size_t)maxBuf);
+            if (buf != NULL) {
+                if (CFStringGetCString(cfStr, buf, maxBuf, kCFStringEncodingUTF8)) {
+                    *out_value = buf;
+                    result = 0;
+                } else {
+                    free(buf);
+                }
+            }
+        }
+    }
+
+    CFRelease(plist);
+    CFRelease(cfKey);
+    return result;
 }
 
 /* Find an app's data container path by scanning Containers directory. */
@@ -604,7 +678,7 @@ static int find_data_container(const char *bundleID, char *out_path, size_t out_
         /*
          * Check the .com.apple.mobile_container_manager.plist metadata file.
          * This is a binary plist containing MCContainerIdentifier which holds
-         * the bundle ID.  We use plutil to parse it reliably.
+         * the bundle ID.  We parse it directly with CoreFoundation.
          */
         char plist_path[MAX_CMD_LEN];
         snprintf(plist_path, sizeof(plist_path),
@@ -622,41 +696,16 @@ static int find_data_container(const char *bundleID, char *out_path, size_t out_
             }
         }
 
-        /* Use plutil to extract MCContainerIdentifier from the binary plist. */
-        char cmd[MAX_CMD_LEN];
-        snprintf(cmd, sizeof(cmd),
-                 "/usr/bin/plutil -extract MCContainerIdentifier raw '%s' 2>/dev/null",
-                 plist_path);
-
-        char container_id[512] = {0};
-        if (run_shell_capture(cmd, container_id, sizeof(container_id)) == 0) {
-            /* Strip whitespace/newlines. */
-            char *s = container_id;
-            size_t len = strlen(s);
-            while (len > 0 && (s[len-1] == '\n' || s[len-1] == '\r' ||
-                               s[len-1] == ' '  || s[len-1] == '"')) {
-                s[--len] = '\0';
-            }
-            while (*s == '"' || *s == ' ') s++;
-
-            if (strcmp(s, bundleID) == 0) {
+        /* Parse the binary plist with CoreFoundation and read MCContainerIdentifier. */
+        char *container_id = NULL;
+        if (read_plist_string(plist_path, "MCContainerIdentifier", &container_id) == 0) {
+            if (strcmp(container_id, bundleID) == 0) {
                 snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
+                free(container_id);
                 found = 1;
                 break;
             }
-        }
-
-        /*
-         * Fallback: grep the plist for the bundle ID in case
-         * MCContainerIdentifier is absent or named differently.
-         */
-        snprintf(cmd, sizeof(cmd),
-                 "/usr/bin/plutil -p '%s' 2>/dev/null | grep -q '%s'",
-                 plist_path, bundleID);
-        if (run_shell(cmd) == 0) {
-            snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
-            found = 1;
-            break;
+            free(container_id);
         }
     }
     closedir(dir);
@@ -926,43 +975,27 @@ int allow_paste_all(void) {
                 snprintf(info_path, sizeof(info_path), "%s/%s/Info.plist",
                          app_dir, app_entry->d_name);
 
-                /* Extract CFBundleIdentifier using plutil via run_shell_capture. */
-                char cmd[MAX_CMD_LEN];
-                snprintf(cmd, sizeof(cmd),
-                         "/usr/bin/plutil -extract CFBundleIdentifier raw '%s' 2>/dev/null",
-                         info_path);
+                /* Extract CFBundleIdentifier using CoreFoundation. */
+                char *bundle_id = NULL;
+                if (read_plist_string(info_path, "CFBundleIdentifier", &bundle_id) == 0
+                    && strlen(bundle_id) > 0) {
+                    /* Insert a paste permission row.
+                     * Only the essential columns are set; auth_value=2 means
+                     * "allowed".  We use INSERT OR REPLACE keyed on
+                     * (service, client) so re-runs are idempotent. */
+                    const char *sql =
+                        "INSERT OR REPLACE INTO access "
+                        "(service, client, client_type, auth_value, "
+                        "auth_reason, auth_version, flags) "
+                        "VALUES('kTCCServicePasteboard', ?1, 0, 2, 0, 1, 0);";
 
-                char bundle_id[512] = {0};
-                if (run_shell_capture(cmd, bundle_id, sizeof(bundle_id)) >= 0) {
-                    /* Strip trailing newline / quotes. */
-                    size_t len = strlen(bundle_id);
-                    while (len > 0 && (bundle_id[len-1] == '\n' ||
-                                       bundle_id[len-1] == '\r' ||
-                                       bundle_id[len-1] == '"')) {
-                        bundle_id[--len] = '\0';
+                    sqlite3_stmt *stmt = NULL;
+                    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                        sqlite3_bind_text(stmt, 1, bundle_id, -1, SQLITE_STATIC);
+                        sqlite3_step(stmt);
+                        sqlite3_finalize(stmt);
                     }
-                    /* Strip leading quotes. */
-                    char *start = bundle_id;
-                    while (*start == '"') start++;
-
-                    if (strlen(start) > 0) {
-                        /* Insert a paste permission row.
-                         * Only the essential columns are set; auth_value=2 means
-                         * "allowed".  We use INSERT OR REPLACE keyed on
-                         * (service, client) so re-runs are idempotent. */
-                        const char *sql =
-                            "INSERT OR REPLACE INTO access "
-                            "(service, client, client_type, auth_value, "
-                            "auth_reason, auth_version, flags) "
-                            "VALUES('kTCCServicePasteboard', ?1, 0, 2, 0, 1, 0);";
-
-                        sqlite3_stmt *stmt = NULL;
-                        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-                            sqlite3_bind_text(stmt, 1, start, -1, SQLITE_STATIC);
-                            sqlite3_step(stmt);
-                            sqlite3_finalize(stmt);
-                        }
-                    }
+                    free(bundle_id);
                 }
             }
             closedir(appdir);
@@ -1313,6 +1346,22 @@ void print_usage(const char *prog) {
  * ========================================================================= */
 
 int main(int argc, char *argv[]) {
+    /* ── Elevate to root ────────────────────────────────────────────
+     * On TrollStore, the app has 'platform-application' entitlement
+     * which allows setuid(0).  We must become root before performing
+     * any privileged operation (keychain-2.db, TCC.db, launchctl, etc.)
+     * ──────────────────────────────────────────────────────────────── */
+    uid_t old_uid = getuid();
+    if (setuid(0) != 0) {
+        LOG("WARNING: setuid(0) failed (uid=%d, errno=%d: %s). "
+            "Privileged operations may not work.",
+            old_uid, errno, strerror(errno));
+    } else {
+        setgid(0);
+        setsid();
+        LOG("Elevated to root (was uid=%d)", old_uid);
+    }
+
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;

@@ -94,6 +94,8 @@ if [ -f "${ROOTHELPER_SRC}" ] && [ -f "${ROOTHELPER_HDR}" ]; then
             -mios-version-min=16.0 \
             -O2 \
             -framework Foundation \
+            -framework CoreFoundation \
+            -lsqlite3 \
             -o "${ROOTHELPER_OUT}" \
             "${ROOTHELPER_SRC}" 2>/dev/null && {
             chmod 0755 "${ROOTHELPER_OUT}"
