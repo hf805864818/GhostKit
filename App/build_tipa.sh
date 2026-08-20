@@ -75,15 +75,43 @@ fi
 echo "==> Found bundle: ${APP_BUNDLE}"
 
 # ---------------------------------------------------------------------------
-# Step 5 - Copy RootHelper binary into the bundle (if exists)
+# Step 5 - Compile RootHelper from source (64-bit arm64e)
 # ---------------------------------------------------------------------------
-ROOTHELPER_BIN="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper"
-if [ -f "${ROOTHELPER_BIN}" ]; then
-    cp "${ROOTHELPER_BIN}" "${APP_BUNDLE}/RootHelper"
-    chmod 0755 "${APP_BUNDLE}/RootHelper"
-    echo "==> Bundled RootHelper binary"
+ROOTHELPER_SRC="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper.c"
+ROOTHELPER_HDR="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper.h"
+ROOTHELPER_OUT="${APP_BUNDLE}/RootHelper"
+
+if [ -f "${ROOTHELPER_SRC}" ] && [ -f "${ROOTHELPER_HDR}" ]; then
+    echo "==> Compiling RootHelper from source (arm64e)..."
+
+    XCODE_ROOT=$(xcode-select -p 2>/dev/null || echo "/Applications/Xcode.app/Contents/Developer")
+    SDK_PATH="${XCODE_ROOT}/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
+
+    if [ -d "${SDK_PATH}" ]; then
+        clang \
+            -arch arm64e \
+            -isysroot "${SDK_PATH}" \
+            -mios-version-min=16.0 \
+            -O2 \
+            -framework Foundation \
+            -o "${ROOTHELPER_OUT}" \
+            "${ROOTHELPER_SRC}" 2>/dev/null && {
+            chmod 0755 "${ROOTHELPER_OUT}"
+            echo "==> RootHelper compiled successfully"
+        } || echo "Warning: RootHelper compilation failed, using pre-compiled binary"
+    else
+        echo "Warning: iPhoneOS SDK not found, skipping RootHelper compilation"
+    fi
 else
-    echo "==> Warning: RootHelper binary not found, skipping"
+    # Fallback: use pre-compiled binary
+    ROOTHELPER_BIN="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper"
+    if [ -f "${ROOTHELPER_BIN}" ]; then
+        cp "${ROOTHELPER_BIN}" "${ROOTHELPER_OUT}"
+        chmod 0755 "${ROOTHELPER_OUT}"
+        echo "==> Bundled pre-compiled RootHelper binary"
+    else
+        echo "==> Warning: RootHelper source and binary not found"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
