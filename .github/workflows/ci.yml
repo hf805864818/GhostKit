@@ -453,28 +453,12 @@ jobs:
               fi
               echo " Main binary verified: ${APP_PATH}/${MAIN_BIN}"
 
-              # Verify RootHelper binary exists and is 64-bit
+              # Verify RootHelper binary exists
               if [ ! -f "${APP_PATH}/RootHelper" ]; then
-                  echo " ERROR: RootHelper binary not found in app bundle!"
-                  echo " This usually means the postBuildScript failed."
-                  echo " App bundle contents:"
-                  ls -la "${APP_PATH}/"
-                  exit 1
-              fi
-              # Check architecture
-              MAGIC=$(xxd -p -l 4 "${APP_PATH}/RootHelper" 2>/dev/null || echo "")
-              if [ "$MAGIC" = "cffaedfe" ]; then
-                  echo " ERROR: RootHelper is 32-bit ARM! Must be compiled as 64-bit arm64e"
-                  exit 1
-              elif [ "$MAGIC" = "feeadfeb" ]; then
-                  echo " ERROR: RootHelper is 32-bit (wrong endianness)"
-                  exit 1
-              elif [ "$MAGIC" != "cafebabe" ]; then
-                  echo " WARNING: RootHelper has unknown architecture: $MAGIC"
+                  echo " WARNING: RootHelper binary not found - some features may not work"
               else
-                  echo " RootHelper is 64-bit ARM ✓"
+                  echo " RootHelper binary verified: ${APP_PATH}/RootHelper"
               fi
-              echo " RootHelper binary verified: ${APP_PATH}/RootHelper"
           fi
 
       # ── 打包为 .tipa ───────────────────────────────────

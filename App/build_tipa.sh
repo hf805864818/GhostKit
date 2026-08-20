@@ -75,48 +75,15 @@ fi
 echo "==> Found bundle: ${APP_BUNDLE}"
 
 # ---------------------------------------------------------------------------
-# Step 5 - Compile RootHelper from source (64-bit arm64e)
+# Step 5 - Copy RootHelper binary into the bundle (if exists)
 # ---------------------------------------------------------------------------
-ROOTHELPER_SRC="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper.c"
-ROOTHELPER_HDR="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper.h"
-ROOTHELPER_OUT="${APP_BUNDLE}/RootHelper"
-
-if [ -f "${ROOTHELPER_SRC}" ] && [ -f "${ROOTHELPER_HDR}" ]; then
-    echo "==> Compiling RootHelper from source (arm64e)..."
-    
-    # Find Xcode toolchain for iOS cross-compilation
-    XCODE_ROOT=$(xcode-select -p 2>/dev/null || echo "/Applications/Xcode.app/Contents/Developer")
-    SDK_VERSION=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "17.0")
-    SDK_PATH="${XCODE_ROOT}/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
-    
-    if [ ! -d "${SDK_PATH}" ]; then
-        echo "Warning: iPhoneOS SDK not found, skipping RootHelper compilation"
-    else
-        # Compile with arm64e target and sign with entitlements
-        clang \
-            -arch arm64e \
-            -isysroot "${SDK_PATH}" \
-            -mios-version-min=16.0 \
-            -O2 \
-            -framework Foundation \
-            -o "${ROOTHELPER_OUT}" \
-            "${ROOTHELPER_SRC}" 2>/dev/null || {
-            echo "Warning: RootHelper compilation failed, binary may not work"
-        }
-        
-        if [ -f "${ROOTHELPER_OUT}" ]; then
-            chmod 0755 "${ROOTHELPER_OUT}"
-            echo "==> RootHelper compiled successfully"
-        fi
-    fi
+ROOTHELPER_BIN="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper"
+if [ -f "${ROOTHELPER_BIN}" ]; then
+    cp "${ROOTHELPER_BIN}" "${APP_BUNDLE}/RootHelper"
+    chmod 0755 "${APP_BUNDLE}/RootHelper"
+    echo "==> Bundled RootHelper binary"
 else
-    # Fallback: check for pre-compiled binary (old behavior)
-    ROOTHELPER_BIN="${PROJECT_DIR}/GhostKitApp/RootHelper/RootHelper"
-    if [ -f "${ROOTHELPER_BIN}" ]; then
-        cp "${ROOTHELPER_BIN}" "${ROOTHELPER_OUT}"
-        chmod 0755 "${ROOTHELPER_OUT}"
-        echo "==> Bundled pre-compiled RootHelper binary"
-    fi
+    echo "==> Warning: RootHelper binary not found, skipping"
 fi
 
 # ---------------------------------------------------------------------------
