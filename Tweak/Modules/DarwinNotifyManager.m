@@ -62,7 +62,7 @@ static NSString *const kResultFilePath   = @"/var/mobile/Library/GhostKit/result
         usleep(50000); // 50ms
     }
     NSLog(@"[GhostKit] Darwin notify timeout for command %ld", (long)command);
-    return DarwinCommandUnknown;
+    return nil;
 }
 
 - (void)postNotification:(DarwinCommand)command params:(nullable NSDictionary *)params {
@@ -77,7 +77,7 @@ static NSString *const kResultFilePath   = @"/var/mobile/Library/GhostKit/result
 
 #pragma mark - Helpers
 
-+ (nullable DarwinCommand)commandFromString:(NSString *)name {
++ (DarwinCommand)commandFromString:(NSString *)name {
     if ([name isEqualToString:@"GhostKitCleanKeychain"])            return DarwinCommandCleanKeychain;
     if ([name isEqualToString:@"GhostKitDeepCleanKeychain"])        return DarwinCommandDeepCleanKeychain;
     if ([name isEqualToString:@"GhostKitDeleteAllKeychains"])       return DarwinCommandDeleteAllKeychains;
