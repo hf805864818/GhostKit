@@ -62,7 +62,7 @@ static NSString *const kResultFilePath   = @"/var/mobile/Library/GhostKit/result
         usleep(50000); // 50ms
     }
     NSLog(@"[GhostKit] Darwin notify timeout for command %ld", (long)command);
-    return nil;
+    return nil; // NSDictionary return type is OK
 }
 
 - (void)postNotification:(DarwinCommand)command params:(nullable NSDictionary *)params {
