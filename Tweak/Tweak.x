@@ -27,6 +27,7 @@
 #import "Modules/SystemManager.h"
 #import "Modules/InjectionManager.h"
 #import "Modules/GraphicsConfigManager.h"
+#import "Modules/DarwinNotifyManager.h"
 #import "Modules/OverlayController.h"
 
 // ---------------------------------------------------------------------------
