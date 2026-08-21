@@ -52,7 +52,6 @@ typedef NS_ENUM(NSInteger, DarwinCommand) {
     DarwinCommandRestoreDefaultGraphics,
     DarwinCommandShowSettings,
     DarwinCommandUnknown = -1
-    DarwinCommandUnknown = -1
 };
 
 @interface DarwinNotifyManager : NSObject
