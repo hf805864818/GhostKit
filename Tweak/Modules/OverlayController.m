@@ -48,6 +48,8 @@
 @interface OverlayController () {
     UIWindow *_overlayWindow;
     UIApplication *_app;
+    CFAbsoluteTime _pressStartTime;
+    int _pressFingerCount;
 }
 @end
 
@@ -63,7 +65,9 @@
 - (instancetype)init {
     if (self = [super init]) {
         _app = [UIApplication sharedApplication];
-        [_self ensureDir];
+        [self ensureDir];
+        _pressStartTime = 0;
+        _pressFingerCount = 0;
     }
     return self;
 }
@@ -95,21 +99,21 @@
 - (BOOL)shouldProcessGesture:(UIPanGestureRecognizer *)pan {
     if (![self isCurrentAppEnabled]) return NO;
     if (pan.state == UIGestureRecognizerStateBegan) {
-        self.pressStartTime = CFAbsoluteTimeGetCurrent();
-        self.pressFingerCount = (int)pan.numberOfTouches;
+        _pressStartTime = CFAbsoluteTimeGetCurrent();
+        _pressFingerCount = (int)pan.numberOfTouches;
     }
     return YES;
 }
 
 - (void)onThreeFingerPan:(UIPanGestureRecognizer *)pan {
-    self.pressStartTime = 0;
-    self.pressFingerCount = 0;
     if (![self isCurrentAppEnabled]) return;
     if (pan.state == UIGestureRecognizerStateEnded) {
-        CGFloat duration = CFAbsoluteTimeGetCurrent() - self.pressStartTime;
-        if (duration >= 0.5 && duration <= 3.0 && self.pressFingerCount == 3) {
+        CGFloat duration = CFAbsoluteTimeGetCurrent() - _pressStartTime;
+        if (duration >= 0.5 && duration <= 3.0 && _pressFingerCount == 3) {
             [self showFeatureButtons];
         }
+        _pressStartTime = 0;
+        _pressFingerCount = 0;
     }
 }
 
@@ -117,10 +121,10 @@
 
 - (void)showFeatureButtons {
     [self hideOverlay];
-    UIWindow *keyWindow = _app.keyWindow;
+    UIWindow *keyWindow = [self _findKeyWindow];
     if (!keyWindow) return;
     _overlayWindow = [[GhostKitOverlayWindow alloc] initWithFrame:keyWindow.bounds];
-    FeatureButtonsVC *vc = [[FeatureButtonsVC alloc] init];
+    GhostKitFeatureButtonsViewController *vc = [[GhostKitFeatureButtonsViewController alloc] init];
     _overlayWindow.rootViewController = vc;
     _overlayWindow.backgroundColor = [UIColor clearColor];
     _overlayWindow.hidden = NO;
@@ -131,11 +135,11 @@
 
 - (void)showSettings {
     [self hideOverlay];
-    UIWindow *keyWindow = _app.keyWindow;
+    UIWindow *keyWindow = [self _findKeyWindow];
     if (!keyWindow) return;
     _overlayWindow = [[GhostKitOverlayWindow alloc] initWithFrame:keyWindow.bounds];
     UINavigationController *nav = [[UINavigationController alloc]
-        initWithRootViewController:[[SettingsVC alloc] init]];
+        initWithRootViewController:[[GhostKitSettingsViewController alloc] init]];
     nav.modalPresentationStyle = UIModalPresentationOverFullScreen;
     nav.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     _overlayWindow.rootViewController = nav;
@@ -185,6 +189,27 @@
 }
 
 #pragma mark - Helpers
+
+- (UIWindow *)_findKeyWindow {
+    // iOS 13+ compatible way to find the key window
+    // (keyWindow is deprecated, use windowScene.windows instead)
+    for (UIWindowScene *scene in _app.connectedScenes) {
+        if (scene.activationState == UISceneActivationStateForegroundActive &&
+            [scene isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *window in scene.windows) {
+                if (window.isKeyWindow) {
+                    return window;
+                }
+            }
+            // Fallback: return first window in the active scene
+            if (scene.windows.count > 0) {
+                return scene.windows.firstObject;
+            }
+        }
+    }
+    // Last resort fallback
+    return _app.windows.firstObject;
+}
 
 - (void)ensureDir {
     NSFileManager *fm = [NSFileManager defaultManager];
