@@ -3,18 +3,22 @@
  * GhostKit
  *
  * Privileged C helper for GhostKit.  Spawned by RootHelperManager (Swift)
- * to perform root-level operations on an iOS device installed via TrollStore.
+ * to perform system operations on iOS.
  *
- * The binary inherits the TrollStore entitlements and runs as root, so every
- * file-system and database operation below is already fully privileged.
+ * PRIVILEGE MODEL:
+ *   - RootHelper attempts to elevate to root via setuid(0) at startup
+ *   - If successful, all operations can access system-critical paths
+ *   - If setuid(0) fails (TrollStore without proper entitlements), 
+ *     RootHelper runs in "limited mode" and refuses privileged operations
+ *   - Some operations (cache cleanup, graphics config) may work without root
  *
- * Operations:
+ * OPERATIONS:
  *   clean_keychain, deep_clean_keychain, delete_all_keychains, restore_keychains
  *   reset_idfa, clean_system, clean_cache, clean_data_dir, clean_cookies
  *   reset_device, allow_paste_all, respring, ldrestart
  *   uninstall_app, apply_config
  *
- * Compile:
+ * COMPILE:
  *   xcrun -sdk iphoneos cc -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
  *       -o RootHelper RootHelper.c -lsqlite3 -framework Foundation
  *       -framework MobileCoreServices -framework CoreFoundation
@@ -1346,20 +1350,30 @@ void print_usage(const char *prog) {
  * ========================================================================= */
 
 int main(int argc, char *argv[]) {
-    /* ── Elevate to root ────────────────────────────────────────────
-     * On TrollStore, the app has 'platform-application' entitlement
-     * which allows setuid(0).  We must become root before performing
-     * any privileged operation (keychain-2.db, TCC.db, launchctl, etc.)
-     * ──────────────────────────────────────────────────────────────── */
+    /* ── Detect privilege level ───────────────────────────────────────
+     * Try to elevate to root via setuid(0).
+     * Success means: TrollStore with proper entitlements, or rootful JB.
+     * Failure means: Running in limited mode; privileged ops will error.
+     * This allows graceful degradation instead of silent failures.
+     * ───────────────────────────────────────────────────────────────── */
     uid_t old_uid = getuid();
-    if (setuid(0) != 0) {
-        LOG("WARNING: setuid(0) failed (uid=%d, errno=%d: %s). "
-            "Privileged operations may not work.",
-            old_uid, errno, strerror(errno));
+    int can_root = 0;
+
+    if (old_uid == 0) {
+        /* Already root (e.g., injected Tweak or rootful jailbreak) */
+        can_root = 1;
+        LOG("Running as root (already privileged)");
     } else {
-        setgid(0);
-        setsid();
-        LOG("Elevated to root (was uid=%d)", old_uid);
+        /* Try elevation */
+        if (setuid(0) == 0 && getuid() == 0) {
+            setgid(0);
+            setsid();
+            can_root = 1;
+            LOG("Elevated to root (was uid=%d)", old_uid);
+        } else {
+            LOG("setuid(0) failed (errno=%d: %s). Limited mode.",
+                errno, strerror(errno));
+        }
     }
 
     if (argc < 2) {
@@ -1369,68 +1383,89 @@ int main(int argc, char *argv[]) {
 
     const char *cmd = argv[1];
 
+    /* Helper: require root */
+    #define REQUIRE_ROOT() do { \
+        if (!can_root) { \
+            fprintf(stderr, "ERROR: requires root privileges (setuid(0) failed).\n" \
+                            "       Install the .deb Tweak for full functionality, or\n" \
+                            "       ensure TrollStore uses a profile with platform-application entitlements.\n"); \
+            return 1; \
+        } \
+    } while (0)
+
     /* -- Keychain -- */
     if (strcmp(cmd, "clean-keychain") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s clean-keychain <bundleID>\n", argv[0]); return 1; }
+        REQUIRE_ROOT();
         return clean_keychain(argv[2]);
     }
     if (strcmp(cmd, "deep-clean-keychain") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s deep-clean-keychain <bundleID>\n", argv[0]); return 1; }
+        REQUIRE_ROOT();
         return deep_clean_keychain(argv[2]);
     }
     if (strcmp(cmd, "delete-all-keychains") == 0) {
+        REQUIRE_ROOT();
         return delete_all_keychains();
     }
     if (strcmp(cmd, "restore-keychains") == 0) {
+        REQUIRE_ROOT();
         return restore_keychains();
     }
 
     /* -- IDFA -- */
     if (strcmp(cmd, "reset-idfa") == 0) {
+        REQUIRE_ROOT();
         return reset_idfa();
     }
 
     /* -- System / cache -- */
     if (strcmp(cmd, "clean-system") == 0) {
+        REQUIRE_ROOT();
         return clean_system();
     }
     if (strcmp(cmd, "clean-cache") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s clean-cache <bundleID>\n", argv[0]); return 1; }
-        return clean_cache(argv[2]);
+        return clean_cache(argv[2]);  /* May work for app's own container */
     }
     if (strcmp(cmd, "clean-data-dir") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s clean-data-dir <bundleID>\n", argv[0]); return 1; }
-        return clean_data_dir(argv[2]);
+        return clean_data_dir(argv[2]);  /* May work for app's own container */
     }
     if (strcmp(cmd, "clean-cookies") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s clean-cookies <bundleID>\n", argv[0]); return 1; }
-        return clean_cookies(argv[2]);
+        return clean_cookies(argv[2]);  /* May work for app's own container */
     }
 
     /* -- Device -- */
     if (strcmp(cmd, "reset-device") == 0) {
+        REQUIRE_ROOT();
         return reset_device();
     }
     if (strcmp(cmd, "allow-paste-all") == 0) {
+        REQUIRE_ROOT();
         return allow_paste_all();
     }
     if (strcmp(cmd, "respring") == 0) {
+        REQUIRE_ROOT();
         return respring();
     }
     if (strcmp(cmd, "ldrestart") == 0) {
+        REQUIRE_ROOT();
         return ldrestart();
     }
 
     /* -- Uninstall -- */
     if (strcmp(cmd, "uninstall") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s uninstall <bundleID>\n", argv[0]); return 1; }
+        REQUIRE_ROOT();
         return uninstall_app(argv[2]);
     }
 
     /* -- Graphics config -- */
     if (strcmp(cmd, "apply-config") == 0) {
         if (argc < 4) { fprintf(stderr, "Usage: %s apply-config <bundleID> <configPath>\n", argv[0]); return 1; }
-        return apply_config(argv[2], argv[3]);
+        return apply_config(argv[2], argv[3]);  /* May work without root */
     }
 
     /* -- Help -- */

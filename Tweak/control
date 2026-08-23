@@ -5,4 +5,6 @@ Architecture: iphoneos-arm64e
 Description: iOS Keychain/IDFA cleaning and device management tool
 Maintainer: hf805864818
 Section: Tweaks
-Depends: mobilesubstrate, firmware (>= 16.5)
+Depends: preferenceloader (>= 0.9), firmware (>= 16.0)
+Conflicts: com.dyp.qm, com.dyp.wt
+Replaces: com.dyp.qm, com.dyp.wt
