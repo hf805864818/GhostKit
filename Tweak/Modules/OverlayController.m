@@ -65,7 +65,8 @@
 - (instancetype)init {
     if (self = [super init]) {
         _app = [UIApplication sharedApplication];
-        [self ensureDir];
+        // Ensure directory exists
+    [[NSFileManager defaultManager] createDirectoryAtPath:CONFIG_DIR withIntermediateDirectories:YES attributes:nil error:nil];
         _pressStartTime = 0;
         _pressFingerCount = 0;
     }
