@@ -66,7 +66,7 @@
     if (self = [super init]) {
         _app = [UIApplication sharedApplication];
         // Ensure directory exists
-    [[NSFileManager defaultManager] createDirectoryAtPath:CONFIG_DIR withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSFileManager defaultManager] createDirectoryAtPath:[ENABLED_PLIST_PATH stringifyByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
         _pressStartTime = 0;
         _pressFingerCount = 0;
     }
