@@ -2,7 +2,7 @@
 # Supports both rootful and rootless jailbreaks
 
 # Base target - adjust to your iOS version
-TARGET := iphone:clang:16.5:17.0
+TARGET := iphone:clang:16.5:16.5
 ARCHS = arm64e
 
 include $(THEOS)/makefiles/common.mk
