@@ -209,7 +209,13 @@
         }
     }
     // Last resort fallback
-    return _app.windows.firstObject;
+    // Use UIWindowsScene API for iOS 13+ compatibility
+    for (UIWindowScene *scene in _app.connectedScenes) {
+        if (scene.windows.count > 0) {
+            return scene.windows.firstObject;
+        }
+    }
+    return nil;
 }
 
 - (void)ensureDir {
