@@ -1352,28 +1352,34 @@ void print_usage(const char *prog) {
 int main(int argc, char *argv[]) {
     /* ── Detect privilege level ───────────────────────────────────────
      * Try to elevate to root via setuid(0).
-     * Success means: TrollStore with proper entitlements, or rootful JB.
-     * Failure means: Running in limited mode; privileged ops will error.
-     * This allows graceful degradation instead of silent failures.
+     * If successful: all operations can access system-critical paths.
+     * If failed: print detailed error and exit immediately.
      * ───────────────────────────────────────────────────────────────── */
     uid_t old_uid = getuid();
-    int can_root = 0;
 
     if (old_uid == 0) {
-        /* Already root (e.g., injected Tweak or rootful jailbreak) */
-        can_root = 1;
         LOG("Running as root (already privileged)");
     } else {
-        /* Try elevation */
-        if (setuid(0) == 0 && getuid() == 0) {
-            setgid(0);
-            setsid();
-            can_root = 1;
-            LOG("Elevated to root (was uid=%d)", old_uid);
-        } else {
-            LOG("setuid(0) failed (errno=%d: %s). Limited mode.",
-                errno, strerror(errno));
+        if (setuid(0) != 0 || getuid() != 0) {
+            fprintf(stderr, "\n╔══════════════════════════════════════════════════════════════╗\n");
+            fprintf(stderr, "║  ERROR: Insufficient privileges to perform this operation  ║\n");
+            fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n\n");
+            fprintf(stderr, "Details:\n");
+            fprintf(stderr, "  - Current user: uid=%d (non-root)\n", old_uid);
+            fprintf(stderr, "  - setuid(0) failed: errno=%d (%s)\n", errno, strerror(errno));
+            fprintf(stderr, "\nSolution (choose one):\n");
+            fprintf(stderr, "  1. Install the .deb Tweak (requires RelaXin/Dopamine jailbreak)\n");
+            fprintf(stderr, "     → Tweak runs as root in SpringBoard and handles all operations\n\n");
+            fprintf(stderr, "  2. Use TrollStore with platform-application entitlements\n");
+            fprintf(stderr, "     → Requires custom provisioning profile with:\n");
+            fprintf(stderr, "       - platform-application\n");
+            fprintf(stderr, "       - com.apple.private.security.no-sandbox\n\n");
+            fprintf(stderr, "  3. Run via sudo (not recommended for TrollStore apps)\n\n");
+            return 1;
         }
+        setgid(0);
+        setsid();
+        LOG("Elevated to root (was uid=%d)", old_uid);
     }
 
     if (argc < 2) {
@@ -1383,45 +1389,29 @@ int main(int argc, char *argv[]) {
 
     const char *cmd = argv[1];
 
-    /* Helper: require root */
-    #define REQUIRE_ROOT() do { \
-        if (!can_root) { \
-            fprintf(stderr, "ERROR: requires root privileges (setuid(0) failed).\n" \
-                            "       Install the .deb Tweak for full functionality, or\n" \
-                            "       ensure TrollStore uses a profile with platform-application entitlements.\n"); \
-            return 1; \
-        } \
-    } while (0)
-
     /* -- Keychain -- */
     if (strcmp(cmd, "clean-keychain") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s clean-keychain <bundleID>\n", argv[0]); return 1; }
-        REQUIRE_ROOT();
         return clean_keychain(argv[2]);
     }
     if (strcmp(cmd, "deep-clean-keychain") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s deep-clean-keychain <bundleID>\n", argv[0]); return 1; }
-        REQUIRE_ROOT();
         return deep_clean_keychain(argv[2]);
     }
     if (strcmp(cmd, "delete-all-keychains") == 0) {
-        REQUIRE_ROOT();
         return delete_all_keychains();
     }
     if (strcmp(cmd, "restore-keychains") == 0) {
-        REQUIRE_ROOT();
         return restore_keychains();
     }
 
     /* -- IDFA -- */
     if (strcmp(cmd, "reset-idfa") == 0) {
-        REQUIRE_ROOT();
         return reset_idfa();
     }
 
     /* -- System / cache -- */
     if (strcmp(cmd, "clean-system") == 0) {
-        REQUIRE_ROOT();
         return clean_system();
     }
     if (strcmp(cmd, "clean-cache") == 0) {
@@ -1439,26 +1429,21 @@ int main(int argc, char *argv[]) {
 
     /* -- Device -- */
     if (strcmp(cmd, "reset-device") == 0) {
-        REQUIRE_ROOT();
         return reset_device();
     }
     if (strcmp(cmd, "allow-paste-all") == 0) {
-        REQUIRE_ROOT();
         return allow_paste_all();
     }
     if (strcmp(cmd, "respring") == 0) {
-        REQUIRE_ROOT();
         return respring();
     }
     if (strcmp(cmd, "ldrestart") == 0) {
-        REQUIRE_ROOT();
         return ldrestart();
     }
 
     /* -- Uninstall -- */
     if (strcmp(cmd, "uninstall") == 0) {
         if (argc < 3) { fprintf(stderr, "Usage: %s uninstall <bundleID>\n", argv[0]); return 1; }
-        REQUIRE_ROOT();
         return uninstall_app(argv[2]);
     }
 
