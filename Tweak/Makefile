@@ -32,3 +32,17 @@ GhostKit_PRIVATE_FRAMEWORKS = SpringBoardServices MobileContainerManager AppSupp
 GhostKit_LIBRARIES = sqlite3
 
 include $(THEOS_MAKE_PATH)/tweak.mk
+
+# ── Preference Bundle ──────────────────────────────────────────────
+# Builds GhostKitPrefs.bundle, installed to /Library/PreferenceBundles/.
+# This makes GhostKit settings appear in the iOS Settings app.
+
+BUNDLE_NAME = GhostKitPrefs
+
+GhostKitPrefs_FILES = Preferences/GSKPreferencesController.m
+GhostKitPrefs_CFLAGS = -fobjc-arc -IPreferences
+GhostKitPrefs_FRAMEWORKS = UIKit CoreFoundation
+GhostKitPrefs_PRIVATE_FRAMEWORKS = Preferences
+GhostKitPrefs_RESOURCES = Preferences/GhostKitPrefs.plist
+
+include $(THEOS_MAKE_PATH)/preferences.mk

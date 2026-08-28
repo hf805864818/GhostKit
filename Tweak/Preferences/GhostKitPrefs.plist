@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>StringsTable</key>
+    <string>Root</string>
+    <key>PreferenceSpecifiers</key>
+    <array>
+        <!-- General -->
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>通用设置</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>启用 GhostKit</string>
+            <key>Key</key>
+            <string>GhostKitEnabled</string>
+            <key>DefaultValue</key>
+            <true/>
+            <key>CellType</key>
+            <string>SwitchCell</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>启用三指手势</string>
+            <key>Key</key>
+            <string>GhostKitGestureEnabled</string>
+            <key>DefaultValue</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>手势触发方式</string>
+            <key>Value</key>
+            <string>三指长按 0.5 秒</string>
+            <key>DefaultValue</key>
+            <string>三指长按 0.5 秒</string>
+        </dict>
+
+        <!-- Feature Toggles -->
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>功能开关</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>Keychain 清理</string>
+            <key>Key</key>
+            <string>GhostKitKeychainCleanEnabled</string>
+            <key>DefaultValue</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>IDFA 刷新</string>
+            <key>Key</key>
+            <string>GhostKitIDFARefreshEnabled</string>
+            <key>DefaultValue</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>缓存清理</string>
+            <key>Key</key>
+            <string>GhostKitCacheCleanEnabled</string>
+            <key>DefaultValue</key>
+            <true/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>粘贴权限管理</string>
+            <key>Key</key>
+            <string>GhostKitPastePermissionEnabled</string>
+            <key>DefaultValue</key>
+            <true/>
+        </dict>
+
+        <!-- Auto Actions -->
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>自动操作</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>应用启动时自动清理</string>
+            <key>Key</key>
+            <string>GhostKitAutoCleanOnLaunch</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSToggleSwitchSpecifier</string>
+            <key>Title</key>
+            <string>清理后自动注销</string>
+            <key>Key</key>
+            <string>GhostKitAutoRespringAfterClean</string>
+            <key>DefaultValue</key>
+            <false/>
+        </dict>
+
+        <!-- System Actions -->
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>系统操作</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSButtonSpecifier</string>
+            <key>Title</key>
+            <string>🔄 注销 (Respring)</string>
+            <key>Key</key>
+            <string>GhostKitRespringButton</string>
+            <key>Action</key>
+            <string>respringButtonTapped</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSButtonSpecifier</string>
+            <key>Title</key>
+            <string>🔄 软重启 (ldrestart)</string>
+            <key>Key</key>
+            <string>GhostKitLdrestartButton</string>
+            <key>Action</key>
+            <string>ldrestartButtonTapped</string>
+        </dict>
+
+        <!-- About -->
+        <dict>
+            <key>Type</key>
+            <string>PSGroupSpecifier</string>
+            <key>Title</key>
+            <string>关于</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>版本</string>
+            <key>Key</key>
+            <string>GhostKitVersion</string>
+            <key>Value</key>
+            <string>1.0.16</string>
+            <key>DefaultValue</key>
+            <string>1.0.16</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>作者</string>
+            <key>Value</key>
+            <string>GhostKit Project</string>
+            <key>DefaultValue</key>
+            <string>GhostKit Project</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>许可证</string>
+            <key>Value</key>
+            <string>MIT</string>
+            <key>DefaultValue</key>
+            <string>MIT</string>
+        </dict>
+        <dict>
+            <key>Type</key>
+            <string>PSTitleValueSpecifier</string>
+            <key>Title</key>
+            <string>适用越狱</string>
+            <key>Value</key>
+            <string>Rootless / TrollStore</string>
+            <key>DefaultValue</key>
+            <string>Rootless / TrollStore</string>
+        </dict>
+    </array>
+</dict>
+</plist>

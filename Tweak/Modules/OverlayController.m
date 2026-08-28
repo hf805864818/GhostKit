@@ -13,8 +13,25 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 #define ENABLED_PLIST_PATH @"/var/mobile/Library/GhostKit/enabled_apps.plist"
+
+// ---------------------------------------------------------------------------
+// Preference reading — same approach as Tweak.x.
+// Uses CFPreferencesCopyAppValue to read from the com.ghostkit.tweak domain
+// so it works regardless of which process the Tweak is injected into.
+// ---------------------------------------------------------------------------
+static BOOL GSKPrefBool(NSString *key, BOOL defaultValue) {
+    CFPropertyListRef val = CFPreferencesCopyAppValue(
+        (__bridge CFStringRef)key,
+        (__bridge CFStringRef)@"com.ghostkit.tweak");
+    if (val) {
+        BOOL result = [(__bridge_transfer NSNumber *)val boolValue];
+        return result;
+    }
+    return defaultValue;
+}
 
 // ---------------------------------------------------------------------------
 // Private window subclass — absorbs touches so underlying app can't intercept
@@ -75,6 +92,11 @@
 #pragma mark - Lifecycle
 
 - (void)start {
+    // Check master switch — don't start if disabled in Settings.
+    if (!GSKPrefBool(@"GhostKitEnabled", YES)) {
+        NSLog(@"[GhostKit] Disabled in preferences — OverlayController not started");
+        return;
+    }
     [self hookThreeFingerLongPress];
     NSLog(@"[GhostKit] OverlayController started");
 }
@@ -97,6 +119,9 @@
 }
 
 - (BOOL)shouldProcessGesture:(UIPanGestureRecognizer *)pan {
+    // Check master switch and gesture toggle from preferences.
+    if (!GSKPrefBool(@"GhostKitEnabled", YES)) return NO;
+    if (!GSKPrefBool(@"GhostKitGestureEnabled", YES)) return NO;
     if (![self isCurrentAppEnabled]) return NO;
     if (pan.state == UIGestureRecognizerStateBegan) {
         _pressStartTime = CFAbsoluteTimeGetCurrent();
@@ -161,6 +186,9 @@
 - (BOOL)isOverlayVisible { return _overlayWindow && !_overlayWindow.hidden; }
 
 - (BOOL)isCurrentAppEnabled {
+    // Check global master switch from preferences.
+    if (!GSKPrefBool(@"GhostKitEnabled", YES)) return NO;
+    // Check app whitelist.
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     return [[self enabledBundleIDs] containsObject:bid];
 }

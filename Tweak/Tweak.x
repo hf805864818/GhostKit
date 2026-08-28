@@ -39,6 +39,41 @@ static NSString *const kCommandFilePath  = @"/var/mobile/Library/GhostKit/comman
 static NSString *const kResultFilePath    = @"/var/mobile/Library/GhostKit/result.plist";
 
 // ---------------------------------------------------------------------------
+// Preference reading — reads from the com.ghostkit.tweak preference domain.
+// Uses CFPreferencesCopyAppValue so it works correctly even when the Tweak
+// is injected into a non-GhostKit process (NSUserDefaults would read the
+// host app's defaults, not the tweak's).
+// ---------------------------------------------------------------------------
+
+static NSString *const kPrefDomain = @"com.ghostkit.tweak";
+
+static BOOL GSKPrefBool(NSString *key, BOOL defaultValue) {
+    CFPropertyListRef val = CFPreferencesCopyAppValue(
+        (__bridge CFStringRef)key,
+        (__bridge CFStringRef)kPrefDomain);
+    if (val) {
+        BOOL result = [(__bridge_transfer NSNumber *)val boolValue];
+        return result;
+    }
+    return defaultValue;
+}
+
+/// Master switch — is GhostKit enabled globally?
+static BOOL GSKIsEnabled(void) {
+    return GSKPrefBool(@"GhostKitEnabled", YES);
+}
+
+/// Is the 3-finger gesture enabled?
+static BOOL GSKGestureEnabled(void) {
+    return GSKPrefBool(@"GhostKitGestureEnabled", YES);
+}
+
+/// Is a specific feature toggle enabled?
+static BOOL GSKFeatureEnabled(NSString *key) {
+    return GSKPrefBool(key, YES);
+}
+
+// ---------------------------------------------------------------------------
 // Notification name constants
 // ---------------------------------------------------------------------------
 
@@ -285,12 +320,20 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
 #pragma mark - Keychain handlers
 
 - (void)handleCleanKeychain:(NSNotification *)note {
+    if (!GSKFeatureEnabled(@"GhostKitKeychainCleanEnabled")) {
+        [self postResult:@(NO) forCommand:kNotifCleanKeychain];
+        return;
+    }
     NSString *bundleID = note.userInfo[@"bundleID"];
     BOOL ok = [[KeychainManager sharedInstance] cleanKeychainForBundleID:bundleID];
     [self postResult:@(ok) forCommand:kNotifCleanKeychain];
 }
 
 - (void)handleDeepCleanKeychain:(NSNotification *)note {
+    if (!GSKFeatureEnabled(@"GhostKitKeychainCleanEnabled")) {
+        [self postResult:@(NO) forCommand:kNotifDeepCleanKeychain];
+        return;
+    }
     NSString *bundleID = note.userInfo[@"bundleID"];
     BOOL ok = [[KeychainManager sharedInstance] deepCleanKeychainForBundleID:bundleID];
     [self postResult:@(ok) forCommand:kNotifDeepCleanKeychain];
@@ -322,6 +365,10 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
 #pragma mark - Identifier handlers
 
 - (void)handleRefreshIDFA:(NSNotification *)note {
+    if (!GSKFeatureEnabled(@"GhostKitIDFARefreshEnabled")) {
+        [self postResult:@(NO) forCommand:kNotifRefreshIDFA];
+        return;
+    }
     BOOL ok = [[IdentifierManager sharedInstance] refreshIDFA];
     [self postResult:@(ok) forCommand:kNotifRefreshIDFA];
 }
@@ -351,6 +398,10 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
 #pragma mark - Cache cleaner handlers
 
 - (void)handleCleanSystemResidue:(NSNotification *)note {
+    if (!GSKFeatureEnabled(@"GhostKitCacheCleanEnabled")) {
+        [self postResult:@(NO) forCommand:kNotifCleanSystemResidue];
+        return;
+    }
     BOOL ok = [[CacheCleaner sharedInstance] cleanSystemResidue];
     [self postResult:@(ok) forCommand:kNotifCleanSystemResidue];
 }
@@ -452,6 +503,10 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
 #pragma mark - Permission handlers
 
 - (void)handleAllowPasteForAll:(NSNotification *)note {
+    if (!GSKFeatureEnabled(@"GhostKitPastePermissionEnabled")) {
+        [self postResult:@(NO) forCommand:kNotifAllowPasteForAll];
+        return;
+    }
     BOOL ok = [[PermissionManager sharedInstance] allowPasteForAllApps];
     [self postResult:@(ok) forCommand:kNotifAllowPasteForAll];
 }
@@ -535,6 +590,13 @@ static void ghostkit_darwin_callback(CFNotificationCenterRef center,
 #pragma mark - Registration (Darwin notification center)
 
 - (void)registerObservers {
+    // Check master switch — if GhostKit is disabled in Settings,
+    // don't register any observers.
+    if (!GSKIsEnabled()) {
+        NSLog(@"[GhostKit] Disabled in preferences — not registering observers");
+        return;
+    }
+
     /*
      * Use CFNotificationCenterGetDarwinNotifyCenter() for cross-process
      * communication.  Darwin notifications work between the GhostKit App
