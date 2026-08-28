@@ -7,10 +7,12 @@
  *
  * PRIVILEGE MODEL:
  *   - RootHelper attempts to elevate to root via setuid(0) at startup
- *   - If successful, all operations can access system-critical paths
- *   - If setuid(0) fails (TrollStore without proper entitlements), 
- *     RootHelper runs in "limited mode" and refuses privileged operations
- *   - Some operations (cache cleanup, graphics config) may work without root
+ *   - If successful (rootful jailbreak), all operations have full access
+ *   - If setuid(0) fails (rootless jailbreak / TrollStore), RootHelper
+ *     continues anyway — the app's entitlements (platform-application +
+ *     no-sandbox) provide sufficient filesystem access for most operations.
+ *   - Individual operations report their own errors if they genuinely
+ *     require root (e.g., stopping system daemons may fail).
  *
  * OPERATIONS:
  *   clean_keychain, deep_clean_keychain, delete_all_keychains, restore_keychains
@@ -1353,7 +1355,11 @@ int main(int argc, char *argv[]) {
     /* ── Detect privilege level ───────────────────────────────────────
      * Try to elevate to root via setuid(0).
      * If successful: all operations can access system-critical paths.
-     * If failed: print detailed error and exit immediately.
+     * If failed: continue anyway — on TrollStore with proper entitlements
+     *   (platform-application + no-sandbox), the app can access the
+     *   filesystem and perform most operations without root.
+     * Individual operations will report their own errors if they
+     * genuinely require root.
      * ───────────────────────────────────────────────────────────────── */
     uid_t old_uid = getuid();
 
@@ -1361,25 +1367,19 @@ int main(int argc, char *argv[]) {
         LOG("Running as root (already privileged)");
     } else {
         if (setuid(0) != 0 || getuid() != 0) {
-            fprintf(stderr, "\n╔══════════════════════════════════════════════════════════════╗\n");
-            fprintf(stderr, "║  ERROR: Insufficient privileges to perform this operation  ║\n");
-            fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n\n");
-            fprintf(stderr, "Details:\n");
-            fprintf(stderr, "  - Current user: uid=%d (non-root)\n", old_uid);
-            fprintf(stderr, "  - setuid(0) failed: errno=%d (%s)\n", errno, strerror(errno));
-            fprintf(stderr, "\nSolution (choose one):\n");
-            fprintf(stderr, "  1. Install the .deb Tweak (requires RelaXin/Dopamine jailbreak)\n");
-            fprintf(stderr, "     → Tweak runs as root in SpringBoard and handles all operations\n\n");
-            fprintf(stderr, "  2. Use TrollStore with platform-application entitlements\n");
-            fprintf(stderr, "     → Requires custom provisioning profile with:\n");
-            fprintf(stderr, "       - platform-application\n");
-            fprintf(stderr, "       - com.apple.private.security.no-sandbox\n\n");
-            fprintf(stderr, "  3. Run via sudo (not recommended for TrollStore apps)\n\n");
-            return 1;
+            /* setuid(0) failed — this is expected on rootless jailbreaks
+             * (RelaXin/Dopamine) and TrollStore. Continue anyway: the
+             * app's entitlements (no-sandbox, platform-application)
+             * provide sufficient filesystem access for most operations. */
+            LOG("setuid(0) failed (errno=%d: %s) — continuing with entitlements",
+                errno, strerror(errno));
+            LOG("Running as uid=%d (non-root). Relying on entitlements for access.",
+                old_uid);
+        } else {
+            setgid(0);
+            setsid();
+            LOG("Elevated to root (was uid=%d)", old_uid);
         }
-        setgid(0);
-        setsid();
-        LOG("Elevated to root (was uid=%d)", old_uid);
     }
 
     if (argc < 2) {
