@@ -3,8 +3,8 @@
 //  GhostKit
 //
 //  Bridges the SwiftUI layer with the C `RootHelper` binary.
-//  Uses posix_spawn (not Process, which is macOS-only) to execute
-//  the RootHelper binary.
+//  Uses SpawnBridge.c (posix_spawn C bridge) because Swift on iOS
+//  blocks direct process spawning APIs (popen/system).
 //
 
 import Foundation
@@ -51,23 +51,22 @@ public class RootHelperManager: ObservableObject {
     // MARK: - Properties
     
     @Published public var lastResult: RootHelperResult?
+    @Published public var lastOutput: String?
     
     /// Path to the RootHelper binary bundled inside the app.
+    /// The postBuildScript in project.yml compiles RootHelper.c and
+    /// copies the binary into the .app bundle root.
     private lazy var rootHelperPath: String = {
-        // The RootHelper binary is compiled and copied into the app bundle
-        // during the build phase.  Check the main bundle first.
         let bundlePath = Bundle.main.bundlePath
         let candidate = (bundlePath as NSString).appendingPathComponent("RootHelper")
         if FileManager.default.isExecutableFile(atPath: candidate) {
             return candidate
         }
-        // Fallback: look in Frameworks or Resources subdirectories.
-        let frameworksPath = (bundlePath as NSString).appendingPathComponent("Frameworks/RootHelper")
-        if FileManager.default.isExecutableFile(atPath: frameworksPath) {
-            return frameworksPath
+        // Fallback: Frameworks subdirectory
+        let fwPath = (bundlePath as NSString).appendingPathComponent("Frameworks/RootHelper")
+        if FileManager.default.isExecutableFile(atPath: fwPath) {
+            return fwPath
         }
-        // Last resort: return the default path even if it doesn't exist yet
-        // (the error will be reported at execution time).
         return candidate
     }()
     
@@ -75,13 +74,16 @@ public class RootHelperManager: ObservableObject {
     
     public init() {}
     
-    // MARK: - Core execution
+    // MARK: - Core execution via SpawnBridge C bridge
     
-    /// Execute RootHelper with given arguments using posix_spawn.
+    /// Execute RootHelper with given arguments.
+    ///
+    /// Uses `spawn_and_capture()` from SpawnBridge.c — a C bridge for
+    /// posix_spawn that works on iOS (Swift blocks popen/system directly).
     ///
     /// - Parameter args: Command and arguments to pass to the RootHelper binary
     ///   (e.g. `["clean-keychain", "com.example.app"]`).
-    /// - Returns: `.success` on exit code 0, `.failure` with captured stderr otherwise.
+    /// - Returns: `.success` on exit code 0, `.failure` with captured output otherwise.
     public func execute(_ args: [String]) -> RootHelperResult {
         guard !args.isEmpty else {
             return .failure("No command specified")
@@ -90,11 +92,12 @@ public class RootHelperManager: ObservableObject {
         let binary = rootHelperPath
         
         // Verify the binary exists and is executable.
-        guard FileManager.default.isExecutableFile(atPath: binary) else {
-            return .failure("RootHelper binary not found or not executable at: \(binary)")
+        guard FileManager.default.fileExists(atPath: binary) else {
+            return .failure("RootHelper binary not found at: \(binary)\nThis usually means the postBuildScript did not run during compilation.")
         }
         
-        // Build argv: [binary, cmd, arg1, arg2, ..., nil]
+        // Build C argv array: [binary, arg0, arg1, ..., nil]
+        // Using strdup + free for automatic memory management.
         var cArgs: [UnsafeMutablePointer<CChar>?] = []
         cArgs.append(strdup(binary))
         for arg in args {
@@ -108,69 +111,39 @@ public class RootHelperManager: ObservableObject {
             }
         }
         
-        // Create a pipe to capture stderr (RootHelper writes errors there).
-        var pipefd: [Int32] = [0, 0]
-        guard pipe(&pipefd) == 0 else {
-            return .failure("Failed to create pipe: \(String(cString: strerror(errno)))")
-        }
+        // Output buffer — 16 KB is plenty for RootHelper's stderr/stdout.
+        let outSize = 16384
+        var outputBuffer = [CChar](repeating: 0, count: outSize)
         
-        var fileActions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_adddup2(&fileActions, pipefd[1], STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, pipefd[1], STDERR_FILENO)
-        posix_spawn_file_actions_addclose(&fileActions, pipefd[0])
-        posix_spawn_file_actions_addclose(&fileActions, pipefd[1])
+        // Call the C bridge function from SpawnBridge.c
+        // This handles posix_spawn, pipe setup, output capture, and waitpid.
+        let exitCode = spawn_and_capture(
+            binary,
+            cArgs,
+            &outputBuffer,
+            Int32(outSize)
+        )
         
-        var pid: pid_t = 0
-        let spawnResult = posix_spawnp(&pid, binary, &fileActions, nil, cArgs, environ)
+        let output = String(cString: outputBuffer)
         
-        posix_spawn_file_actions_destroy(&fileActions)
-        close(pipefd[1])
+        // Store the last output for debugging
+        lastOutput = output
         
-        if spawnResult != 0 {
-            close(pipefd[0])
-            return .failure("posix_spawn failed (errno=\(spawnResult)): \(String(cString: strerror(spawnResult)))")
-        }
-        
-        // Read captured output.
-        var output = Data()
-        var buf = [UInt8](repeating: 0, count: 4096)
-        var n: Int = 0
-        repeat {
-            n = read(pipefd[0], &buf, buf.count)
-            if n > 0 {
-                output.append(contentsOf: buf[0..<n])
-            }
-        } while n > 0
-        close(pipefd[0])
-        
-        // Wait for the child process to exit.
-        var status: Int32 = 0
-        waitpid(pid, &status, 0)
-        
-        let outputString = String(data: output, encoding: .utf8) ?? ""
-        
-        if WIFEXITED(status) {
-            let exitCode = WEXITSTATUS(status)
-            if exitCode == 0 {
-                return .success
-            } else {
-                // Include the captured output in the error message for debugging.
-                let trimmed = outputString.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty {
-                    return .failure("RootHelper exited with code \(exitCode)")
-                } else {
-                    return .failure(trimmed)
-                }
-            }
-        } else if WIFSIGNALED(status) {
-            return .failure("RootHelper terminated by signal \(WTERMSIG(status))")
+        if exitCode == 0 {
+            return .success
         } else {
-            return .failure("RootHelper exited abnormally")
+            // Include the captured stderr/stdout in the error message.
+            // RootHelper writes detailed diagnostics to stderr.
+            let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                return .failure("RootHelper exited with code \(exitCode) (no output captured)")
+            } else {
+                return .failure(trimmed)
+            }
         }
     }
     
-    // MARK: - Async helper
+    // MARK: - Async wrapper
     
     private func runAsync(_ args: String..., completion: @escaping (RootHelperResult) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
