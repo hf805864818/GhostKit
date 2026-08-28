@@ -40,9 +40,18 @@ extern char **environ;
 static int run_shell(const char *cmd) {
     if (!cmd || !*cmd) return -1;
 
-    char *argv[] = { "/bin/sh", "-c", (char *)cmd, NULL };
+    /* On iOS, /bin/sh does not exist. Try /var/jb/bin/sh (rootless jailbreak)
+     * or /bin/bash as fallbacks. If none exist, the command fails silently. */
+    const char *sh_paths[] = { "/bin/sh", "/var/jb/bin/sh", "/bin/bash", NULL };
+    const char *sh = NULL;
+    for (int i = 0; sh_paths[i]; i++) {
+        if (access(sh_paths[i], X_OK) == 0) { sh = sh_paths[i]; break; }
+    }
+    if (!sh) return -1;
+
+    char *argv[] = { (char *)sh, "-c", (char *)cmd, NULL };
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ);
+    int rc = posix_spawn(&pid, sh, NULL, NULL, argv, environ);
     if (rc != 0) return -1;
 
     int status = 0;
@@ -55,6 +64,14 @@ static int run_shell_capture(const char *cmd, char *output, int out_size) {
     if (!cmd || !*cmd || !output || out_size <= 0) return -1;
     output[0] = '\0';
 
+    /* Find an available shell on iOS. */
+    const char *sh_paths[] = { "/bin/sh", "/var/jb/bin/sh", "/bin/bash", NULL };
+    const char *sh = NULL;
+    for (int i = 0; sh_paths[i]; i++) {
+        if (access(sh_paths[i], X_OK) == 0) { sh = sh_paths[i]; break; }
+    }
+    if (!sh) return -1;
+
     int pipefd[2];
     if (pipe(pipefd) != 0) return -1;
 
@@ -65,9 +82,9 @@ static int run_shell_capture(const char *cmd, char *output, int out_size) {
     posix_spawn_file_actions_addclose(&actions, pipefd[0]);
     posix_spawn_file_actions_addclose(&actions, pipefd[1]);
 
-    char *argv[] = { "/bin/sh", "-c", (char *)cmd, NULL };
+    char *argv[] = { (char *)sh, "-c", (char *)cmd, NULL };
     pid_t pid = 0;
-    int rc = posix_spawn(&pid, "/bin/sh", &actions, NULL, argv, environ);
+    int rc = posix_spawn(&pid, sh, &actions, NULL, argv, environ);
 
     posix_spawn_file_actions_destroy(&actions);
 
@@ -92,6 +109,52 @@ static int run_shell_capture(const char *cmd, char *output, int out_size) {
     int status = 0;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* ── try_launchctl: try multiple launchctl paths on iOS ───────────────── */
+static int try_launchctl(const char *action, const char *service) {
+    /* On iOS, launchctl may be at different paths depending on jailbreak type:
+     * - Stock iOS: /usr/bin/launchctl (but without root, stop/start may fail)
+     * - Rootless jailbreak (RelaXin/Dopamine): /var/jb/bin/launchctl
+     * - Rootful jailbreak: /usr/bin/launchctl (with root works)
+     */
+    const char *lc_paths[] = {
+        "/var/jb/bin/launchctl",
+        "/usr/bin/launchctl",
+        "/bin/launchctl",
+        NULL
+    };
+
+    for (int i = 0; lc_paths[i]; i++) {
+        if (access(lc_paths[i], X_OK) != 0) continue;
+        int rc = run_simple(lc_paths[i], action, service, NULL);
+        if (rc == 0) {
+            LOG("launchctl %s %s succeeded via %s", action, service, lc_paths[i]);
+            return 0;
+        }
+    }
+    LOG("launchctl %s %s failed (tried all paths)", action, service);
+    return -1;
+}
+
+/* ── try_killall: try multiple killall paths on iOS ───────────────────── */
+static int try_killall(const char *signal, const char *process) {
+    const char *ka_paths[] = {
+        "/var/jb/bin/killall",
+        "/usr/bin/killall",
+        "/bin/killall",
+        NULL
+    };
+
+    for (int i = 0; ka_paths[i]; i++) {
+        if (access(ka_paths[i], X_OK) != 0) continue;
+        int rc = run_simple(ka_paths[i], signal, process, NULL);
+        if (rc == 0) {
+            LOG("killall %s %s succeeded via %s", signal, process, ka_paths[i]);
+            return 0;
+        }
+    }
+    return -1;
 }
 
 /* ===========================================================================
@@ -284,6 +347,12 @@ static int sql_exec(const char *db_path, const char *sql) {
         return -1;
     }
 
+    /* Wait up to 5 seconds if the database is locked by another process
+     * (e.g., securityd holds a lock on keychain-2.db, tccd on TCC.db).
+     * This allows us to modify the DB without stopping the daemon,
+     * which is crucial on rootless jailbreaks where we can't stop daemons. */
+    sqlite3_busy_timeout(db, 5000);
+
     char *errmsg = NULL;
     int rc = sqlite3_exec(db, sql, NULL, NULL, &errmsg);
     if (rc != SQLITE_OK) {
@@ -305,6 +374,9 @@ static int sql_exec_text(const char *db_path, const char *sql, const char *param
         if (db) sqlite3_close(db);
         return -1;
     }
+
+    /* Wait for locks instead of failing immediately. */
+    sqlite3_busy_timeout(db, 5000);
 
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
@@ -340,11 +412,11 @@ int clean_keychain(const char *bundleID) {
     LOG("clean_keychain for '%s'", bundleID);
 
     /*
-     * Stop securityd so it releases the lock on keychain-2.db.
-     * Without this, sqlite3_open / sqlite3_exec fail because
-     * securityd holds an exclusive lock on the database file.
+     * Try to stop securityd so it releases the lock on keychain-2.db.
+     * On rootless jailbreaks this may fail (no root), but we proceed
+     * anyway — sqlite3_busy_timeout will wait for the lock.
      */
-    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    try_launchctl("stop", "com.apple.securityd");
     usleep(500000);  /* Wait 0.5s for securityd to release the lock */
 
     /*
@@ -381,7 +453,7 @@ int clean_keychain(const char *bundleID) {
              "OR label LIKE 'apple.default-keychain');");
 
     /* Restart securityd so it picks up the modified database. */
-    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+    try_launchctl("start", "com.apple.securityd");
 
     if (errors > 0) {
         LOG("clean_keychain completed with %d table errors", errors);
@@ -398,7 +470,7 @@ int deep_clean_keychain(const char *bundleID) {
     LOG("deep_clean_keychain for '%s'", bundleID);
 
     /* Stop securityd to release the database lock before direct sqlite access. */
-    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    try_launchctl("stop", "com.apple.securityd");
     usleep(500000);
 
     /* Deep clean removes ALL rows that could be associated, including
@@ -434,7 +506,7 @@ int deep_clean_keychain(const char *bundleID) {
     sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
 
     /* Restart securityd after database modifications. */
-    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+    try_launchctl("start", "com.apple.securityd");
 
     LOG_OK("deep_clean_keychain done for '%s'", bundleID);
     return errors == 0 ? 0 : -1;
@@ -444,7 +516,7 @@ int delete_all_keychains(void) {
     LOG("delete_all_keychains - backing up then truncating");
 
     /* Stop securityd to release the database lock. */
-    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    try_launchctl("stop", "com.apple.securityd");
     usleep(500000);
 
     /* Create backup directory. */
@@ -472,7 +544,7 @@ int delete_all_keychains(void) {
     sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
 
     /* Restart securityd. */
-    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+    try_launchctl("start", "com.apple.securityd");
 
     LOG_OK("delete_all_keychains done");
     return 0;
@@ -491,17 +563,17 @@ int restore_keychains(void) {
     }
 
     /* Close any open keychain connections by restarting securityd. */
-    run_simple("/bin/launchctl", "stop", "com.apple.securityd", NULL);
+    try_launchctl("stop", "com.apple.securityd");
     usleep(500000);
 
     /* Restore the backup over the live database. */
     if (copy_file(backup_path, KEYCHAIN_DB_PATH) != 0) {
         LOG("restore_keychains: copy failed");
-        run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+        try_launchctl("start", "com.apple.securityd");
         return -1;
     }
 
-    run_simple("/bin/launchctl", "start", "com.apple.securityd", NULL);
+    try_launchctl("start", "com.apple.securityd");
 
     LOG_OK("restore_keychains done");
     return 0;
@@ -545,11 +617,10 @@ int reset_idfa(void) {
     /* Also clear the IDFA from the sqlite DB if present. */
     sql_exec(IDFA_DB_PATH, "DELETE FROM idfa;");
 
-    /* Reset the ASIdentifierManager preference. */
-    run_simple("/usr/bin/defaults", "delete",
-               "com.apple.advertisingIdentifier", "ADIdentifier", NULL);
-    run_simple("/usr/bin/defaults", "delete",
-               "com.apple.advertisingIdentifier", "ASIdentifierManager", NULL);
+    /* Reset the ASIdentifierManager preference.
+     * On iOS, /usr/bin/defaults does not exist. Delete the plist file
+     * directly — iOS will regenerate it with default values on next access. */
+    unlink("/private/var/mobile/Library/Preferences/com.apple.advertisingIdentifier.plist");
 
     LOG_OK("reset_idfa done");
     return 0;
@@ -873,26 +944,19 @@ int reset_device(void) {
         unlink(fingerprint_files[i]);
     }
 
-    /* 5. Reset the advertising defaults */
-    run_simple("/usr/bin/defaults", "delete",
-               "com.apple.advertisingIdentifier", NULL);
+    /* 5. Reset the advertising defaults
+     * On iOS, /usr/bin/defaults does not exist. Delete the plist file directly. */
+    unlink("/private/var/mobile/Library/Preferences/com.apple.advertisingIdentifier.plist");
 
     /* 6. Remove the wifi/SSID cache (forces re-authentication).
-     * com.apple.wifi.plist is a plist file, NOT a SQLite database.
-     * Use `defaults delete` to remove cached networks. */
-    run_simple("/usr/bin/defaults", "delete",
-               "com.apple.wifi", NULL);
-    /* Also delete the WiFi scan cache plist. */
-    run_simple("/bin/rm", "-f",
-               "/private/var/mobile/Library/Preferences/com.apple.wifi.plist", NULL);
+     * Delete the plist file directly instead of using `defaults delete`. */
+    unlink("/private/var/mobile/Library/Preferences/com.apple.wifi.plist");
 
     /* 7. Reset the Bluetooth cache */
-    run_simple("/bin/rm", "-rf",
-               "/private/var/mobile/Library/Preferences/com.apple.Bluetooth.plist", NULL);
+    unlink("/private/var/mobile/Library/Preferences/com.apple.Bluetooth.plist");
 
     /* 8. Reset the UDID cache (forces regeneration) */
-    run_simple("/bin/rm", "-rf",
-               "/private/var/mobile/Library/Caches/com.apple.MobileAccessoryUpdater", NULL);
+    remove_directory_tree("/private/var/mobile/Library/Caches/com.apple.MobileAccessoryUpdater");
 
     /* 9. Delete the provisioning profile cache */
     remove_directory_tree("/private/var/containers/Shared/SystemGroup/"
@@ -910,11 +974,11 @@ int allow_paste_all(void) {
     LOG("allow_paste_all - granting paste permission to all apps");
 
     /*
-     * Stop tccd so it releases the lock on TCC.db.
-     * Without this, sqlite3_open / sqlite3_exec fail because
-     * tccd holds an exclusive lock on the database file.
+     * Try to stop tccd so it releases the lock on TCC.db.
+     * On rootless jailbreaks this may fail, but sqlite3_busy_timeout
+     * will wait for the lock instead of failing immediately.
      */
-    run_simple("/bin/launchctl", "stop", "com.apple.tccd", NULL);
+    try_launchctl("stop", "com.apple.tccd");
     usleep(300000);  /* 0.3s for tccd to release the lock */
 
     /*
@@ -936,9 +1000,12 @@ int allow_paste_all(void) {
     if (sqlite3_open(TCC_DB_PATH, &db) != SQLITE_OK) {
         LOG("allow_paste_all: cannot open TCC.db: %s", sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
-        run_simple("/bin/launchctl", "start", "com.apple.tccd", NULL);
+        try_launchctl("start", "com.apple.tccd");
         return -1;
     }
+
+    /* Wait up to 5s if TCC.db is locked by tccd. */
+    sqlite3_busy_timeout(db, 5000);
 
     /* First, set all existing paste entries to allowed. */
     sql_exec(TCC_DB_PATH,
@@ -1012,7 +1079,7 @@ int allow_paste_all(void) {
     sqlite3_close(db);
 
     /* Restart tccd so it picks up the modified TCC.db. */
-    run_simple("/bin/launchctl", "start", "com.apple.tccd", NULL);
+    try_launchctl("start", "com.apple.tccd");
 
     LOG_OK("allow_paste_all done");
     return 0;
@@ -1025,12 +1092,13 @@ int allow_paste_all(void) {
 int respring(void) {
     LOG("respring");
 
-    /* Kill SpringBoard so it restarts and picks up all changes. */
-    run_simple("/usr/bin/killall", "-9", "SpringBoard", NULL);
+    /* Kill SpringBoard so it restarts and picks up all changes.
+     * Try killall from multiple paths, then launchctl. */
+    try_killall("-9", "SpringBoard");
 
     /* If killall is not available, use launchctl. */
-    run_simple("/bin/launchctl", "stop", "com.apple.SpringBoard", NULL);
-    run_simple("/bin/launchctl", "start", "com.apple.SpringBoard", NULL);
+    try_launchctl("stop", "com.apple.SpringBoard");
+    try_launchctl("start", "com.apple.SpringBoard");
 
     LOG_OK("respring done");
     return 0;
@@ -1039,23 +1107,34 @@ int respring(void) {
 int ldrestart(void) {
     LOG("ldrestart");
 
-    struct stat st;
-    if (stat(LDRESTART_PATH, &st) == 0) {
-        run_simple(LDRESTART_PATH, NULL);
-    } else {
-        /* Fallback: restart key daemons individually. */
-        const char *daemons[] = {
-            "com.apple.securityd",
-            "com.apple.cfprefsd",
-            "com.apple.lsd",
-            "com.apple.SpringBoard",
-        };
-        int count = sizeof(daemons) / sizeof(daemons[0]);
-        for (int i = 0; i < count; i++) {
-            run_simple("/bin/launchctl", "stop", daemons[i], NULL);
-            usleep(200000);
-            run_simple("/bin/launchctl", "start", daemons[i], NULL);
+    /* Try ldrestart from multiple paths. */
+    const char *ldr_paths[] = {
+        "/var/jb/bin/ldrestart",
+        "/usr/bin/ldrestart",
+        LDRESTART_PATH,
+        NULL
+    };
+    for (int i = 0; ldr_paths[i]; i++) {
+        struct stat st;
+        if (stat(ldr_paths[i], &st) == 0) {
+            run_simple(ldr_paths[i], NULL);
+            LOG_OK("ldrestart done via %s", ldr_paths[i]);
+            return 0;
         }
+    }
+
+    /* Fallback: restart key daemons individually. */
+    const char *daemons[] = {
+        "com.apple.securityd",
+        "com.apple.cfprefsd",
+        "com.apple.lsd",
+        "com.apple.SpringBoard",
+    };
+    int count = sizeof(daemons) / sizeof(daemons[0]);
+    for (int i = 0; i < count; i++) {
+        try_launchctl("stop", daemons[i]);
+        usleep(200000);
+        try_launchctl("start", daemons[i]);
     }
 
     LOG_OK("ldrestart done");
@@ -1086,18 +1165,39 @@ int uninstall_app(const char *bundleID) {
      *   5. Run uicache to refresh icons.
      */
 
-    /* Remove bundle container(s). */
-    char cmd[MAX_CMD_LEN];
+    /* Remove bundle container(s) — scan directory in C (no find/rm needed). */
+    {
+        const char *bundle_dirs[] = {
+            "/private/var/containers/Bundle/Application",
+            "/Applications",
+            NULL
+        };
+        char app_suffix[320];
+        snprintf(app_suffix, sizeof(app_suffix), "%s.app", bundleID);
 
-    snprintf(cmd, sizeof(cmd),
-             "/usr/bin/find /private/var/containers/Bundle/Application "
-             "-name '%s.app' -exec rm -rf {} + 2>/dev/null", bundleID);
-    run_shell(cmd);
-
-    snprintf(cmd, sizeof(cmd),
-             "/usr/bin/find /Applications -name '%s.app' -maxdepth 1 "
-             "-exec rm -rf {} + 2>/dev/null", bundleID);
-    run_shell(cmd);
+        for (int d = 0; bundle_dirs[d]; d++) {
+            DIR *dir = opendir(bundle_dirs[d]);
+            if (!dir) continue;
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_name[0] == '.') continue;
+                char subdir[MAX_CMD_LEN];
+                snprintf(subdir, sizeof(subdir), "%s/%s", bundle_dirs[d], entry->d_name);
+                DIR *sub = opendir(subdir);
+                if (!sub) continue;
+                struct dirent *app_entry;
+                while ((app_entry = readdir(sub)) != NULL) {
+                    if (strstr(app_entry->d_name, app_suffix) == NULL) continue;
+                    char app_path[MAX_CMD_LEN];
+                    snprintf(app_path, sizeof(app_path), "%s/%s", subdir, app_entry->d_name);
+                    remove_directory_tree(app_path);
+                    LOG("Removed bundle: %s", app_path);
+                }
+                closedir(sub);
+            }
+            closedir(dir);
+        }
+    }
 
     /* Remove data container. */
     char container[MAX_CMD_LEN];
@@ -1105,33 +1205,80 @@ int uninstall_app(const char *bundleID) {
         remove_directory_tree(container);
     }
 
-    /* Remove app group containers. */
-    snprintf(cmd, sizeof(cmd),
-             "/usr/bin/find /private/var/containers/Shared/AppGroup "
-             "-name '.com.apple.mobile_container_manager' "
-             "-exec grep -l '%s' {} \\; -exec rm -rf $(dirname {}) \\; 2>/dev/null",
-             bundleID);
-    run_shell(cmd);
-
-    /* Remove plugin containers. */
-    snprintf(cmd, sizeof(cmd),
-             "/usr/bin/find /private/var/containers/Shared/PlugInKit "
-             "-name '.com.apple.mobile_container_manager' "
-             "-exec grep -l '%s' {} \\; -exec rm -rf $(dirname {}) \\; 2>/dev/null",
-             bundleID);
-    run_shell(cmd);
+    /* Remove app group containers — scan in C (no find/grep needed). */
+    {
+        const char *shared_dirs[] = {
+            "/private/var/containers/Shared/AppGroup",
+            "/private/var/containers/Shared/PlugInKit",
+            NULL
+        };
+        for (int d = 0; shared_dirs[d]; d++) {
+            DIR *dir = opendir(shared_dirs[d]);
+            if (!dir) continue;
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_name[0] == '.') continue;
+                char plist_path[MAX_CMD_LEN];
+                snprintf(plist_path, sizeof(plist_path),
+                         "%s/%s/.com.apple.mobile_container_manager.plist",
+                         shared_dirs[d], entry->d_name);
+                char *mcid = NULL;
+                if (read_plist_string(plist_path, "MCContainerIdentifier", &mcid) == 0
+                    && mcid != NULL) {
+                    if (strstr(mcid, bundleID) != NULL) {
+                        char group_path[MAX_CMD_LEN];
+                        snprintf(group_path, sizeof(group_path), "%s/%s",
+                                 shared_dirs[d], entry->d_name);
+                        remove_directory_tree(group_path);
+                        LOG("Removed group container: %s", group_path);
+                    }
+                    free(mcid);
+                }
+            }
+            closedir(dir);
+        }
+    }
 
     /* Remove the preferences plist. */
-    snprintf(cmd, sizeof(cmd),
-             "/private/var/mobile/Library/Preferences/%s.plist", bundleID);
-    unlink(cmd);
+    {
+        char cmd[MAX_CMD_LEN];
+        snprintf(cmd, sizeof(cmd),
+                 "/private/var/mobile/Library/Preferences/%s.plist", bundleID);
+        unlink(cmd);
+    }
 
-    /* Update LaunchServices database. */
-    run_simple("/usr/bin/lsregister", "-kill", "-r",
-               "-domain", "system", "-domain", "user", NULL);
+    /* Update LaunchServices database.
+     * lsregister may be at /var/jb/usr/bin/ on rootless jailbreaks. */
+    {
+        const char *lsr_paths[] = {
+            "/var/jb/usr/bin/lsregister",
+            "/usr/bin/lsregister",
+            NULL
+        };
+        for (int i = 0; lsr_paths[i]; i++) {
+            if (access(lsr_paths[i], X_OK) == 0) {
+                run_simple(lsr_paths[i], "-kill", "-r",
+                           "-domain", "system", "-domain", "user", NULL);
+                break;
+            }
+        }
+    }
 
-    /* Refresh icon cache. */
-    run_simple("/usr/bin/uicache", "-p", bundleID, NULL);
+    /* Refresh icon cache.
+     * uicache may be at /var/jb/bin/uicache on rootless jailbreaks. */
+    {
+        const char *uic_paths[] = {
+            "/var/jb/bin/uicache",
+            "/usr/bin/uicache",
+            NULL
+        };
+        for (int i = 0; uic_paths[i]; i++) {
+            if (access(uic_paths[i], X_OK) == 0) {
+                run_simple(uic_paths[i], "-p", bundleID, NULL);
+                break;
+            }
+        }
+    }
 
     LOG_OK("uninstall_app done for '%s'", bundleID);
     return 0;
