@@ -12,6 +12,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Overlay window subclass — absorbs touches so underlying app can't intercept.
+// Defined in OverlayController.m, used by GhostKitFeatureButtonsViewController.
+@interface GhostKitOverlayWindow : UIWindow
+@end
+
 @interface OverlayController : NSObject
 
 + (instancetype)sharedInstance;

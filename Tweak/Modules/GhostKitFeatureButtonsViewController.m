@@ -45,19 +45,6 @@ static const FeatureBtn kFeatures[] = {
 };
 static const NSUInteger kFeatureCount = sizeof(kFeatures) / sizeof(kFeatures[0]);
 
-@interface GhostKitOverlayWindow : UIWindow
-@end
-@implementation GhostKitOverlayWindow
-- (instancetype)init {
-    self = [super initWithFrame:CGRectZero];
-    if (self) {
-        self.windowLevel = UIWindowLevelAlert + 100;
-        self.hidden = YES;
-        self.backgroundColor = [UIColor clearColor];
-    }
-    return self;
-}
-@end
 
 @interface FeatureButtonsVC : UIViewController
 @end

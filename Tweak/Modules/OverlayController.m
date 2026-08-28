@@ -18,9 +18,8 @@
 
 // ---------------------------------------------------------------------------
 // Private window subclass — absorbs touches so underlying app can't intercept
+// (interface declared in OverlayController.h)
 // ---------------------------------------------------------------------------
-@interface GhostKitOverlayWindow : UIWindow
-@end
 @implementation GhostKitOverlayWindow
 - (instancetype)initWithFrame:(CGRect)frame {
     if (self = [super initWithFrame:frame]) {
