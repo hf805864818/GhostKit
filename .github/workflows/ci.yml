@@ -385,24 +385,36 @@ jobs:
           fi
           echo "ldid: $(which ldid 2>/dev/null || echo 'not found')"
 
-      # ── 注入版本号到 Info.plist ────────────────────────
-      - name: 🔢 Inject Version to Info.plist
+      # ── 注入版本号到 project.yml ───────────────────────
+      # 注入版本号到 project.yml，这样 xcodegen 生成的 Info.plist
+      # 和 Xcode 项目设置都包含正确的版本号。
+      - name: 🔢 Inject Version to project.yml
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
-          echo "注入版本号到 Info.plist: ${VERSION}"
+          echo "注入版本号到 project.yml: ${VERSION}"
 
-          PLIST_FILE="App/GhostKitApp/Info.plist"
-          if [ -f "${PLIST_FILE}" ]; then
-            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${PLIST_FILE}" 2>/dev/null || true
-            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" "${PLIST_FILE}" 2>/dev/null || true
-            echo "Info.plist 版本: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ${PLIST_FILE} 2>/dev/null)"
+          PROJECT_YML="App/project.yml"
+          if [ -f "${PROJECT_YML}" ]; then
+            # 替换 project.yml 中的版本号
+            # CFBundleShortVersionString 是营销版本号 (如 1.0.34)
+            # CFBundleVersion 是构建版本号 (如 34)
+            BUILD_NUM=$(echo "${VERSION}" | cut -d. -f3)
+            [ -z "${BUILD_NUM}" ] && BUILD_NUM="${VERSION}"
+
+            sed -i.bak "s/CFBundleShortVersionString:.*/CFBundleShortVersionString: \"${VERSION}\"/" "${PROJECT_YML}"
+            sed -i.bak "s/CFBundleVersion:.*/CFBundleVersion: \"${BUILD_NUM}\"/" "${PROJECT_YML}"
+            rm -f "${PROJECT_YML}.bak"
+
+            echo "project.yml 版本号已更新:"
+            grep -A2 "CFBundleShortVersionString" "${PROJECT_YML}"
+            grep -A2 "CFBundleVersion" "${PROJECT_YML}"
           fi
 
       # ── 生成 Xcode 项目并编译 ─────────────────────────
       - name: 🔨 Build App with Xcode
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
-          echo "开始编译 App..."
+          echo "开始编译 App... (版本: ${VERSION})"
 
           cd App
 
@@ -412,6 +424,17 @@ jobs:
             xcodegen generate 2>&1 || {
               echo "xcodegen 生成失败，尝试手动编译..."
             }
+          fi
+
+          # xcodegen 生成后，再次确保 Info.plist 版本号正确
+          PLIST_FILE="GhostKitApp/Info.plist"
+          if [ -f "${PLIST_FILE}" ]; then
+            BUILD_NUM=$(echo "${VERSION}" | cut -d. -f3)
+            [ -z "${BUILD_NUM}" ] && BUILD_NUM="${VERSION}"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" "${PLIST_FILE}"
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUM}" "${PLIST_FILE}"
+            echo "Info.plist 版本: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' ${PLIST_FILE})"
+            echo "Info.plist 构建: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' ${PLIST_FILE})"
           fi
 
           # 查找 xcodeproj

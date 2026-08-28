@@ -8,6 +8,21 @@
 #import "DarwinNotifyManager.h"
 #import <UIKit/UIKit.h>
 
+#pragma mark - Key Window Helper (iOS 13+ safe, avoids deprecated keyWindow)
+
+static UIWindow * GhostKitGetKeyWindow(void) {
+    UIWindow *window = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *w in scene.windows) {
+            window = w;
+            break;
+        }
+        if (window) break;
+    }
+    return window;
+}
+
 typedef struct {
     NSString *iconName;
     NSString *title;
@@ -196,7 +211,7 @@ static const NSUInteger kFeatureCount = sizeof(kFeatures) / sizeof(kFeatures[0])
 @implementation GhostKitFeatureButtonsViewController
 
 + (void)showOverlayFromViewController:(UIViewController *)vc {
-    UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
+    UIWindow *keyWindow = GhostKitGetKeyWindow();
     if (!keyWindow) return;
     UIWindow *overlay = [[GhostKitOverlayWindow alloc] initWithFrame:keyWindow.bounds];
     FeatureButtonsVC *fbvc = [[FeatureButtonsVC alloc] init];
@@ -209,7 +224,8 @@ static const NSUInteger kFeatureCount = sizeof(kFeatures) / sizeof(kFeatures[0])
 }
 
 + (void)hideOverlay {
-    UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
+    UIWindow *keyWindow = GhostKitGetKeyWindow();
+    if (!keyWindow) return;
     for (UIWindow *w in keyWindow.subviews) {
         if ([w isKindOfClass:[GhostKitOverlayWindow class]] && !w.hidden) {
             [UIView animateWithDuration:0.15 animations:^{ w.alpha = 0.0; }
