@@ -342,8 +342,9 @@ static int mkdir_p(const char *path, mode_t mode) {
 /* Execute a single SQL statement (no results). Returns 0 on success. */
 static int sql_exec(const char *db_path, const char *sql) {
     sqlite3 *db = NULL;
-    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
-        LOG("sql_exec: cannot open '%s': %s", db_path, sqlite3_errmsg(db));
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        LOG("sql_exec: cannot open '%s': %s", db_path,
+            db ? sqlite3_errmsg(db) : "null handle");
         if (db) sqlite3_close(db);
         return -1;
     }
@@ -370,8 +371,9 @@ static int sql_exec(const char *db_path, const char *sql) {
 /* Execute a parameterised SQL statement with one text binding. */
 static int sql_exec_text(const char *db_path, const char *sql, const char *param) {
     sqlite3 *db = NULL;
-    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
-        LOG("sql_exec_text: cannot open '%s'", db_path);
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        LOG("sql_exec_text: cannot open '%s': %s", db_path,
+            db ? sqlite3_errmsg(db) : "null handle");
         if (db) sqlite3_close(db);
         return -1;
     }
@@ -402,23 +404,175 @@ static int sql_exec_text(const char *db_path, const char *sql, const char *param
 }
 
 /* ===========================================================================
- * Keychain operations (via Security framework — no root/file access needed)
+ * Keychain operations
+ *
+ * Strategy: Try Security framework first (SecItemDelete). If it deletes
+ * 0 items (common for standalone binaries on rootless jailbreaks), fall
+ * back to direct SQLite access on keychain-2.db — the RootHelper binary
+ * has no-sandbox + keychain-access-groups:["*"] entitlements, so direct
+ * file access should work.
  * ========================================================================= */
 
-/* Delete all keychain items whose access group matches the bundle ID.
- * Uses SecItemDelete / SecItemCopyMatching instead of direct SQLite access,
- * which requires no root privileges and no file-level access to keychain-2.db. */
+/* Find the keychain-2.db database file at multiple possible paths.
+ *
+ * IMPORTANT: iOS filesystem is case-sensitive. The correct path uses
+ * capital 'K' in "Keychains".  Previous versions used lowercase 'k'
+ * which silently failed to find the database.
+ *
+ * We use access(F_OK) to check existence only — NOT R_OK|W_OK, because
+ * the keychain DB is owned by root and the process may be running as
+ * mobile (uid 501).  Even with no-sandbox entitlements, Unix DAC
+ * permissions still apply to access().  The actual open is handled by
+ * sqlite3_open_v2 which will report the real error if the file can't
+ * be opened for writing. */
+static const char *find_keychain_db(void) {
+    const char *paths[] = {
+        "/private/var/Keychains/keychain-2.db",
+        "/var/protected/Keychains/keychain-2.db",
+        "/var/jb/var/Keychains/keychain-2.db",
+        "/private/var/keychains/keychain-2.db",
+        "/var/keychains/keychain-2.db",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        if (access(paths[i], F_OK) == 0) {
+            LOG("Found keychain DB at: %s", paths[i]);
+            return paths[i];
+        }
+    }
+    LOG("keychain-2.db not found in any known location");
+    return NULL;
+}
+
+/* Direct SQLite-based keychain cleaning — fallback when Security framework
+ * doesn't delete items.  Uses LIKE matching on the agrp (access group) column. */
+static int clean_keychain_sqlite(const char *bundleID) {
+    if (bundleID == NULL) return -1;
+
+    const char *db_path = find_keychain_db();
+    if (db_path == NULL) {
+        LOG("SQLite fallback: cannot find keychain-2.db");
+        return -1;
+    }
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        LOG("SQLite fallback: cannot open %s: %s", db_path,
+            db ? sqlite3_errmsg(db) : "null");
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+
+    sqlite3_busy_timeout(db, 5000);
+
+    /* Build LIKE pattern: %bundleID% */
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%%%s%%", bundleID);
+
+    int total = 0;
+    /* keychain-2.db tables that have an agrp (access group) column. */
+    const char *tables[] = {"genp", "inet", "keys", "cert"};
+    int numTables = sizeof(tables) / sizeof(tables[0]);
+
+    for (int i = 0; i < numTables; i++) {
+        char sql[1024];
+        snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE agrp LIKE ?", tables[i]);
+
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT);
+            int rc = sqlite3_step(stmt);
+            if (rc == SQLITE_DONE) {
+                int changes = sqlite3_changes(db);
+                total += changes;
+                LOG("SQLite: deleted %d rows from %s (agrp LIKE %s)",
+                    changes, tables[i], pattern);
+            } else {
+                LOG("SQLite: DELETE from %s failed: %s",
+                    tables[i], sqlite3_errmsg(db));
+            }
+            sqlite3_finalize(stmt);
+        } else {
+            LOG("SQLite: prepare DELETE from %s failed: %s",
+                tables[i], sqlite3_errmsg(db));
+        }
+    }
+
+    /* Also delete from supp (supplementary) table if it has matching rows. */
+    {
+        char sql[1024];
+        snprintf(sql, sizeof(sql),
+            "DELETE FROM supp WHERE cpath IN "
+            "(SELECT cpath FROM genp WHERE agrp LIKE ? "
+            "UNION SELECT cpath FROM inet WHERE agrp LIKE ?)");
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_TRANSIENT);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    sqlite3_close(db);
+    LOG_OK("SQLite fallback: deleted %d total rows for '%s'", total, bundleID);
+    return total;
+}
+
+/* Delete all keychain items via direct SQLite access. */
+static int delete_all_keychains_sqlite(void) {
+    const char *db_path = find_keychain_db();
+    if (db_path == NULL) {
+        LOG("SQLite fallback: cannot find keychain-2.db");
+        return -1;
+    }
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        LOG("SQLite fallback: cannot open %s: %s", db_path,
+            db ? sqlite3_errmsg(db) : "null");
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+
+    sqlite3_busy_timeout(db, 5000);
+
+    int total = 0;
+    const char *tables[] = {"genp", "inet", "keys", "cert", "aview", "tkt"};
+    int numTables = sizeof(tables) / sizeof(tables[0]);
+
+    for (int i = 0; i < numTables; i++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql), "DELETE FROM %s", tables[i]);
+
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_DONE) {
+                int changes = sqlite3_changes(db);
+                total += changes;
+                LOG("SQLite: deleted ALL %d rows from %s", changes, tables[i]);
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    sqlite3_close(db);
+    LOG_OK("SQLite fallback: deleted %d total rows (all keychains)", total);
+    return total;
+}
+
+/* Clean keychain for a specific bundle ID.
+ * Tries Security framework first; falls back to direct SQLite access. */
 int clean_keychain(const char *bundleID) {
     if (bundleID == NULL) {
         return -1;
     }
 
-    LOG("clean_keychain for '%s' (via Security framework)", bundleID);
+    LOG("clean_keychain for '%s'", bundleID);
 
     CFStringRef cfBundleID = CFStringCreateWithCString(NULL, bundleID, kCFStringEncodingUTF8);
     if (cfBundleID == NULL) return -1;
 
-    /* Iterate over all keychain item classes. */
     CFStringRef secClasses[] = {
         kSecClassGenericPassword,
         kSecClassInternetPassword,
@@ -430,8 +584,8 @@ int clean_keychain(const char *bundleID) {
 
     int deleted = 0;
 
+    /* ── Phase 1: Security framework ────────────────────────────── */
     for (int i = 0; i < numClasses; i++) {
-        /* Query all items of this class with their attributes. */
         CFMutableDictionaryRef query = CFDictionaryCreateMutable(
             NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(query, kSecClass, secClasses[i]);
@@ -447,14 +601,12 @@ int clean_keychain(const char *bundleID) {
             for (CFIndex j = 0; j < count; j++) {
                 CFDictionaryRef item = (CFDictionaryRef)CFArrayGetValueAtIndex(results, j);
 
-                /* Check if the access group contains the bundle ID. */
                 CFStringRef agrp = (CFStringRef)CFDictionaryGetValue(item, kSecAttrAccessGroup);
                 if (agrp == NULL) continue;
 
                 CFRange range = CFStringFind(agrp, cfBundleID, 0);
                 if (range.location == kCFNotFound) continue;
 
-                /* Build a delete query with identifying attributes. */
                 CFMutableDictionaryRef delQuery = CFDictionaryCreateMutable(
                     NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
                 CFDictionarySetValue(delQuery, kSecClass, secClasses[i]);
@@ -474,11 +626,42 @@ int clean_keychain(const char *bundleID) {
             }
             CFRelease(results);
         }
-        /* errSecItemNotFound = no items of this class, which is fine. */
     }
 
     CFRelease(cfBundleID);
-    LOG_OK("clean_keychain: deleted %d items for '%s'", deleted, bundleID);
+    LOG("Security framework: deleted %d items for '%s'", deleted, bundleID);
+
+    /* ── Phase 2: SQLite fallback ───────────────────────────────── */
+    /* If the Security framework deleted 0 items, it may be because the
+     * standalone binary can't access other apps' keychain groups.
+     * Fall back to direct SQLite access (requires no-sandbox entitlements). */
+    if (deleted == 0) {
+        LOG("Security framework deleted 0 items — trying SQLite fallback...");
+        int sqlite_deleted = clean_keychain_sqlite(bundleID);
+        if (sqlite_deleted > 0) {
+            LOG_OK("clean_keychain: SQLite fallback deleted %d items for '%s'",
+                   sqlite_deleted, bundleID);
+            return 0;
+        } else if (sqlite_deleted == 0) {
+            /* DB opened OK but no rows matched — keychain may be empty. */
+            LOG_OK("clean_keychain: 0 items for '%s' (keychain may be empty)", bundleID);
+            return 0;
+        } else {
+            /* SQLite returned -1 — DB not found or can't open.
+             * Return failure so the Swift layer shows the error message. */
+            LOG("clean_keychain: FAILED for '%s' — "
+                "Security framework deleted 0, SQLite fallback error", bundleID);
+            fprintf(stderr, "ERROR: Cannot access keychain database. "
+                    "Security framework returned 0 items and SQLite fallback failed.\n"
+                    "This usually means the keychain-2.db file is not accessible.\n"
+                    "Check: 1) File exists at /private/var/Keychains/keychain-2.db\n"
+                    "       2) Process has permission to read/write it\n");
+            return -1;
+        }
+    } else {
+        LOG_OK("clean_keychain: deleted %d items for '%s'", deleted, bundleID);
+    }
+
     return 0;
 }
 
@@ -489,11 +672,9 @@ int deep_clean_keychain(const char *bundleID) {
         return -1;
     }
 
-    LOG("deep_clean_keychain for '%s' (via Security framework)", bundleID);
+    LOG("deep_clean_keychain for '%s'", bundleID);
 
-    /* deep_clean_keychain does the same as clean_keychain via the Security
-     * framework — SecItemDelete already handles all the underlying tables.
-     * The "deep" part means we also try deleting by account/service matching. */
+    /* First do the standard clean (which includes SQLite fallback). */
     int rc = clean_keychain(bundleID);
     if (rc != 0) return rc;
 
@@ -508,7 +689,6 @@ int deep_clean_keychain(const char *bundleID) {
     int numClasses = sizeof(secClasses) / sizeof(secClasses[0]);
 
     for (int i = 0; i < numClasses; i++) {
-        /* Delete by account matching. */
         CFMutableDictionaryRef query = CFDictionaryCreateMutable(
             NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(query, kSecClass, secClasses[i]);
@@ -516,7 +696,6 @@ int deep_clean_keychain(const char *bundleID) {
         SecItemDelete(query);
         CFRelease(query);
 
-        /* Delete by service matching. */
         query = CFDictionaryCreateMutable(
             NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(query, kSecClass, secClasses[i]);
@@ -526,14 +705,50 @@ int deep_clean_keychain(const char *bundleID) {
     }
 
     CFRelease(cfBundleID);
+
+    /* Also try SQLite to delete by account/service columns. */
+    const char *db_path = find_keychain_db();
+    if (db_path) {
+        sqlite3 *db = NULL;
+        if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+            sqlite3_busy_timeout(db, 5000);
+            char pattern[512];
+            snprintf(pattern, sizeof(pattern), "%%%s%%", bundleID);
+
+            /* Delete from genp where acct or svce contains bundleID. */
+            const char *sql_genp =
+                "DELETE FROM genp WHERE acct LIKE ? OR svce LIKE ?";
+            sqlite3_stmt *stmt = NULL;
+            if (sqlite3_prepare_v2(db, sql_genp, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_TRANSIENT);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+
+            /* Delete from inet where acct or srvr contains bundleID. */
+            const char *sql_inet =
+                "DELETE FROM inet WHERE acct LIKE ? OR srvr LIKE ?";
+            if (sqlite3_prepare_v2(db, sql_inet, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, pattern, -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, pattern, -1, SQLITE_TRANSIENT);
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+
+            sqlite3_close(db);
+            LOG("deep_clean: also cleaned by acct/svce/srvr via SQLite");
+        }
+    }
+
     LOG_OK("deep_clean_keychain done for '%s'", bundleID);
     return 0;
 }
 
 /* Delete ALL keychain items (all classes, all apps).
- * This is the nuclear option — everything goes. */
+ * Tries Security framework first; falls back to direct SQLite access. */
 int delete_all_keychains(void) {
-    LOG("delete_all_keychains (via Security framework)");
+    LOG("delete_all_keychains");
 
     CFStringRef secClasses[] = {
         kSecClassGenericPassword,
@@ -553,12 +768,33 @@ int delete_all_keychains(void) {
         OSStatus status = SecItemDelete(query);
         if (status == errSecSuccess) {
             totalDeleted++;
-            LOG("Deleted all items of class %d", i);
+            LOG("Security framework: deleted all items of class %d", i);
         }
         CFRelease(query);
     }
 
-    LOG_OK("delete_all_keychains done (cleared %d classes)", totalDeleted);
+    LOG("Security framework: cleared %d classes", totalDeleted);
+
+    /* SQLite fallback — if Security framework cleared 0 classes. */
+    if (totalDeleted == 0) {
+        LOG("Security framework cleared 0 classes — trying SQLite fallback...");
+        int sqlite_deleted = delete_all_keychains_sqlite();
+        if (sqlite_deleted > 0) {
+            LOG_OK("delete_all_keychains: SQLite deleted %d rows", sqlite_deleted);
+        } else if (sqlite_deleted == 0) {
+            LOG_OK("delete_all_keychains: 0 rows (keychain may be empty)");
+        } else {
+            /* SQLite returned -1 — DB not found or can't open. */
+            LOG("delete_all_keychains: FAILED — SQLite fallback error");
+            fprintf(stderr, "ERROR: Cannot access keychain database.\n"
+                    "Security framework cleared 0 classes and SQLite fallback failed.\n"
+                    "Check: 1) File exists at /private/var/Keychains/keychain-2.db\n"
+                    "       2) Process has permission to read/write it\n");
+            return -1;
+        }
+    }
+
+    LOG_OK("delete_all_keychains done");
     return 0;
 }
 
@@ -847,6 +1083,9 @@ int clean_cache(const char *bundleID) {
     char container[MAX_CMD_LEN];
     if (find_data_container(bundleID, container, sizeof(container)) != 0) {
         LOG("clean_cache: container not found for '%s'", bundleID);
+        fprintf(stderr, "ERROR: Cannot find data container for '%s'.\n"
+                "The app may not be installed or the container path is inaccessible.\n",
+                bundleID);
         return -1;
     }
 
@@ -864,10 +1103,6 @@ int clean_cache(const char *bundleID) {
     snprintf(path, sizeof(path), "%s/Library/SplashBoard", container);
     remove_directory_tree(path);
 
-    /* Clean the app's preferences cache. */
-    snprintf(path, sizeof(path), "/private/var/mobile/Library/Preferences/%s.plist", bundleID);
-    /* Note: We do NOT delete the plist, just reload defaults. */
-
     LOG_OK("clean_cache done for '%s'", bundleID);
     return 0;
 }
@@ -882,6 +1117,9 @@ int clean_data_dir(const char *bundleID) {
     char container[MAX_CMD_LEN];
     if (find_data_container(bundleID, container, sizeof(container)) != 0) {
         LOG("clean_data_dir: container not found for '%s'", bundleID);
+        fprintf(stderr, "ERROR: Cannot find data container for '%s'.\n"
+                "The app may not be installed or the container path is inaccessible.\n",
+                bundleID);
         return -1;
     }
 
@@ -921,6 +1159,9 @@ int clean_cookies(const char *bundleID) {
     char container[MAX_CMD_LEN];
     if (find_data_container(bundleID, container, sizeof(container)) != 0) {
         LOG("clean_cookies: container not found for '%s'", bundleID);
+        fprintf(stderr, "ERROR: Cannot find data container for '%s'.\n"
+                "The app may not be installed or the container path is inaccessible.\n",
+                bundleID);
         return -1;
     }
 
@@ -1017,6 +1258,25 @@ int reset_device(void) {
  * TCC paste permissions
  * ========================================================================= */
 
+/* Find the TCC.db database file at multiple possible paths.
+ * Uses F_OK (existence only) — same rationale as find_keychain_db(). */
+static const char *find_tcc_db(void) {
+    const char *paths[] = {
+        "/private/var/mobile/Library/TCC/TCC.db",
+        "/var/mobile/Library/TCC/TCC.db",
+        "/var/jb/var/mobile/Library/TCC/TCC.db",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        if (access(paths[i], F_OK) == 0) {
+            LOG("Found TCC DB at: %s", paths[i]);
+            return paths[i];
+        }
+    }
+    LOG("TCC.db not found in any known location");
+    return NULL;
+}
+
 int allow_paste_all(void) {
     LOG("allow_paste_all - granting paste permission to all apps");
 
@@ -1044,8 +1304,15 @@ int allow_paste_all(void) {
      * for every app found in /var/containers/Bundle/Application.
      */
     sqlite3 *db = NULL;
-    if (sqlite3_open(TCC_DB_PATH, &db) != SQLITE_OK) {
-        LOG("allow_paste_all: cannot open TCC.db: %s", sqlite3_errmsg(db));
+    const char *tcc_path = find_tcc_db();
+    if (tcc_path == NULL) {
+        fprintf(stderr, "ERROR: Cannot find TCC.db — paste permission grant failed.\n");
+        try_launchctl("start", "com.apple.tccd");
+        return -1;
+    }
+    if (sqlite3_open_v2(tcc_path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        LOG("allow_paste_all: cannot open TCC.db: %s",
+            db ? sqlite3_errmsg(db) : "null handle");
         if (db) sqlite3_close(db);
         try_launchctl("start", "com.apple.tccd");
         return -1;
@@ -1055,7 +1322,7 @@ int allow_paste_all(void) {
     sqlite3_busy_timeout(db, 5000);
 
     /* First, set all existing paste entries to allowed. */
-    sql_exec(TCC_DB_PATH,
+    sql_exec(tcc_path,
              "UPDATE access SET auth_value=2, auth_reason=0 "
              "WHERE service='kTCCServicePasteboard';");
 

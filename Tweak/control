@@ -1,8 +1,8 @@
 Package: com.ghostkit.tweak
 Name: GhostKit
 Version: 1.0.0
-Architecture: iphoneos-arm64e
+Architecture: iphoneos-arm64
 Description: iOS Keychain/IDFA cleaning and device management tool
 Maintainer: hf805864818
 Section: Tweaks
-Depends: mobilesubstrate (>= 0.9), firmware (>= 16.0)
+Depends: mobilesubstrate (>= 0.9), firmware (>= 16.0), preferenceloader (>= 2.2.4)

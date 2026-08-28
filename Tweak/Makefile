@@ -1,9 +1,9 @@
 # GhostKit Tweak Makefile
-# Supports both rootful and rootless jailbreaks
+# Supports rootless jailbreaks (RelaXin/Dopamine)
 
-# Base target - adjust to your iOS version
 TARGET := iphone:clang:16.5:16.5
-ARCHS = arm64e
+ARCHS = arm64
+THEOS_PACKAGE_SCHEME = rootless
 
 include $(THEOS)/makefiles/common.mk
 
@@ -34,7 +34,7 @@ GhostKit_LIBRARIES = sqlite3
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 # ── Preference Bundle ──────────────────────────────────────────────
-# Builds GhostKitPrefs.bundle, installed to /Library/PreferenceBundles/.
+# Builds GhostKitPrefs.bundle, installed to /var/jb/Library/PreferenceBundles/.
 # This makes GhostKit settings appear in the iOS Settings app.
 
 BUNDLE_NAME = GhostKitPrefs
