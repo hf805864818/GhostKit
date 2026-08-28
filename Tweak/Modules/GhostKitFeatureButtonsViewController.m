@@ -136,9 +136,42 @@ static const NSUInteger kFeatureCount = sizeof(kFeatures) / sizeof(kFeatures[0])
 - (void)onBtnTap:(UIButton *)btn {
     NSUInteger idx = (NSUInteger)btn.tag;
     if (idx >= kFeatureCount) return;
-    if (kFeatures[idx].darwinCommand) {
-        DarwinCommand dc = [self commandFromString:kFeatures[idx].darwinCommand];
-        [[DarwinNotifyManager sharedInstance] postNotification:dc params:nil];
+    
+    // Get the current process's bundle ID — the Tweak is injected into
+    // the current app, so this gives us the target app for per-app operations.
+    NSString *currentBundleID = [[NSBundle mainBundle] bundleIdentifier];
+    
+    // Determine which commands need a bundleID parameter.
+    NSString *darwinCmd = kFeatures[idx].darwinCommand;
+    BOOL needsBundleID = NO;
+    if (darwinCmd) {
+        NSArray *bundleIDCommands = @[
+            @"GhostKitCleanKeychain",
+            @"GhostKitDeepCleanKeychain",
+            @"GhostKitCleanDatabaseCache",
+            @"GhostKitCleanDataDirectory",
+            @"GhostKitCleanCookies",
+            @"GhostKitGetAppSize",
+            @"GhostKitUninstallApp",
+            @"GhostKitGetAppInfo",
+            @"GhostKitIsPasteAllowed",
+            @"GhostKitInjectDylib",
+            @"GhostKitRemoveDylib",
+            @"GhostKitGetInjectedDylibs",
+            @"GhostKitApplyGraphicsConfig",
+            @"GhostKitGetCurrentGraphics",
+            @"GhostKitRestoreDefaultGraphics",
+        ];
+        needsBundleID = [bundleIDCommands containsObject:darwinCmd];
+    }
+    
+    if (darwinCmd) {
+        DarwinCommand dc = [self commandFromString:darwinCmd];
+        NSDictionary *params = nil;
+        if (needsBundleID && currentBundleID) {
+            params = @{ @"bundleID": currentBundleID };
+        }
+        [[DarwinNotifyManager sharedInstance] postNotification:dc params:params];
     } else if ([kFeatures[idx].title isEqualToString:@"设置"]) {
         [OverlayController.sharedInstance showSettings];
         return;

@@ -40,9 +40,12 @@ static NSString *const kResultFilePath   = @"/var/mobile/Library/GhostKit/result
     // Remove stale result
     [[NSFileManager defaultManager] removeItemAtPath:kResultFilePath error:nil];
 
-    // Write command
+    // Write command — merge params at the top level so handlers can
+    // access bundleID directly via note.userInfo[@"bundleID"].
     NSMutableDictionary *cmd = [@{ @"command": @(command) } mutableCopy];
-    if (params.count) cmd[@"params"] = params;
+    if (params) {
+        [cmd addEntriesFromDictionary:params];
+    }
     [cmd writeToFile:kCommandFilePath atomically:YES];
 
     // Post Darwin notification
@@ -66,8 +69,12 @@ static NSString *const kResultFilePath   = @"/var/mobile/Library/GhostKit/result
 }
 
 - (void)postNotification:(DarwinCommand)command params:(nullable NSDictionary *)params {
+    // Merge params at the top level so handlers can access values
+    // directly via note.userInfo[@"bundleID"], etc.
     NSMutableDictionary *cmd = [@{ @"command": @(command) } mutableCopy];
-    if (params.count) cmd[@"params"] = params;
+    if (params) {
+        [cmd addEntriesFromDictionary:params];
+    }
     [cmd writeToFile:kCommandFilePath atomically:YES];
     NSString *notifName = [DarwinNotifyManager notificationNameForCommand:command];
     CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();

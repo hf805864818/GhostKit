@@ -266,27 +266,62 @@
 
     // 2. Fallback: scan /var/mobile/Containers/Data/Application/ for the
     //    .com.apple.mobile_container_manager.plist whose MCContainerIdentifier
-    //    matches the bundle ID.
+    //    matches the bundle ID.  Try multiple key names and fuzzy matching.
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *containersDir = @"/var/mobile/Containers/Data/Application";
+    NSArray *containersDirs = @[
+        @"/var/mobile/Containers/Data/Application",
+        @"/private/var/mobile/Containers/Data/Application",
+    ];
 
-    NSArray *containerUUIDs = [fm contentsOfDirectoryAtPath:containersDir error:nil];
-    if (!containerUUIDs) {
-        // Try the alternate path on some iOS versions.
-        containersDir = @"/private/var/mobile/Containers/Data/Application";
-        containerUUIDs = [fm contentsOfDirectoryAtPath:containersDir error:nil];
-    }
+    // Possible key names for the container identifier in the plist.
+    NSArray *containerKeys = @[
+        @"MCContainerIdentifier",
+        @"ContainerIdentifier",
+        @"com.apple.container_identifier",
+    ];
 
-    for (NSString *uuid in containerUUIDs) {
-        NSString *plistPath = [containersDir
-            stringByAppendingPathComponent:
-                [NSString stringWithFormat:@"%@/.com.apple.mobile_container_manager.plist", uuid]];
+    for (NSString *containersDir in containersDirs) {
+        NSArray *containerUUIDs = [fm contentsOfDirectoryAtPath:containersDir error:nil];
+        if (!containerUUIDs) continue;
 
-        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-        if (plist) {
-            NSString *containerBundleID = plist[@"MCContainerIdentifier"];
-            if (containerBundleID && [containerBundleID isEqualToString:bundleID]) {
-                return [containersDir stringByAppendingPathComponent:uuid];
+        for (NSString *uuid in containerUUIDs) {
+            NSString *containerPath = [containersDir stringByAppendingPathComponent:uuid];
+
+            // Strategy 1: Check .com.apple.mobile_container_manager.plist
+            NSString *plistPath = [containerPath stringByAppendingPathComponent:
+                @".com.apple.mobile_container_manager.plist"];
+            NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+            if (plist) {
+                for (NSString *key in containerKeys) {
+                    NSString *containerID = plist[key];
+                    if (containerID) {
+                        // Fuzzy matching: exact, contains, or reverse contains.
+                        if ([containerID isEqualToString:bundleID] ||
+                            [containerID containsString:bundleID] ||
+                            [bundleID containsString:containerID]) {
+                            return containerPath;
+                        }
+                    }
+                }
+            }
+
+            // Strategy 2: Check if Library/Preferences/<bundleID>.plist exists.
+            NSString *prefPath = [containerPath stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"Library/Preferences/%@.plist", bundleID]];
+            if ([fm fileExistsAtPath:prefPath]) {
+                return containerPath;
+            }
+
+            // Strategy 3: Check if Library/Preferences/ has any plist
+            // whose name contains the bundle ID.
+            NSString *prefDir = [containerPath stringByAppendingPathComponent:@"Library/Preferences"];
+            NSArray *prefFiles = [fm contentsOfDirectoryAtPath:prefDir error:nil];
+            if (prefFiles) {
+                for (NSString *fileName in prefFiles) {
+                    if ([fileName containsString:bundleID]) {
+                        return containerPath;
+                    }
+                }
             }
         }
     }

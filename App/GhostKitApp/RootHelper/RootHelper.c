@@ -33,6 +33,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
 
 extern char **environ;
 
@@ -401,182 +402,175 @@ static int sql_exec_text(const char *db_path, const char *sql, const char *param
 }
 
 /* ===========================================================================
- * Keychain operations
+ * Keychain operations (via Security framework — no root/file access needed)
  * ========================================================================= */
 
+/* Delete all keychain items whose access group matches the bundle ID.
+ * Uses SecItemDelete / SecItemCopyMatching instead of direct SQLite access,
+ * which requires no root privileges and no file-level access to keychain-2.db. */
 int clean_keychain(const char *bundleID) {
     if (bundleID == NULL) {
         return -1;
     }
 
-    LOG("clean_keychain for '%s'", bundleID);
+    LOG("clean_keychain for '%s' (via Security framework)", bundleID);
 
-    /*
-     * Try to stop securityd so it releases the lock on keychain-2.db.
-     * On rootless jailbreaks this may fail (no root), but we proceed
-     * anyway — sqlite3_busy_timeout will wait for the lock.
-     */
-    try_launchctl("stop", "com.apple.securityd");
-    usleep(500000);  /* Wait 0.5s for securityd to release the lock */
+    CFStringRef cfBundleID = CFStringCreateWithCString(NULL, bundleID, kCFStringEncodingUTF8);
+    if (cfBundleID == NULL) return -1;
 
-    /*
-     * keychain-2.db schema (root-only):
-     *   genp  - generic passwords  (acct, svce, agrp)
-     *   inet  - internet passwords (acct, svce, agrp)
-     *   cert  - certificates       (agrp)
-     *   keys  - keys               (agrp)
-     *   mupd  - managed items      (agrp)
-     *   otlp  - one-time passwords (acct, svce, agrp)
-     *
-     * Delete every row whose access group (agrp) or account (acct)
-     * contains the bundle identifier.
-     */
-    const char *tables[] = { "genp", "inet", "cert", "keys", "mupd", "otlp" };
-    int table_count = sizeof(tables) / sizeof(tables[0]);
+    /* Iterate over all keychain item classes. */
+    CFStringRef secClasses[] = {
+        kSecClassGenericPassword,
+        kSecClassInternetPassword,
+        kSecClassCertificate,
+        kSecClassKey,
+        kSecClassIdentity,
+    };
+    int numClasses = sizeof(secClasses) / sizeof(secClasses[0]);
 
-    char sql[512];
-    int errors = 0;
+    int deleted = 0;
 
-    for (int i = 0; i < table_count; i++) {
-        snprintf(sql, sizeof(sql),
-                 "DELETE FROM %s WHERE agrp LIKE '%%%s%%' OR acct LIKE '%%%s%%';",
-                 tables[i], bundleID, bundleID);
-        if (sql_exec(KEYCHAIN_DB_PATH, sql) != 0) {
-            errors++;
+    for (int i = 0; i < numClasses; i++) {
+        /* Query all items of this class with their attributes. */
+        CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+            NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(query, kSecClass, secClasses[i]);
+        CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitAll);
+        CFDictionarySetValue(query, kSecReturnAttributes, kCFBooleanTrue);
+
+        CFArrayRef results = NULL;
+        OSStatus status = SecItemCopyMatching(query, (CFTypeRef *)&results);
+        CFRelease(query);
+
+        if (status == errSecSuccess && results != NULL) {
+            CFIndex count = CFArrayGetCount(results);
+            for (CFIndex j = 0; j < count; j++) {
+                CFDictionaryRef item = (CFDictionaryRef)CFArrayGetValueAtIndex(results, j);
+
+                /* Check if the access group contains the bundle ID. */
+                CFStringRef agrp = (CFStringRef)CFDictionaryGetValue(item, kSecAttrAccessGroup);
+                if (agrp == NULL) continue;
+
+                CFRange range = CFStringFind(agrp, cfBundleID, 0);
+                if (range.location == kCFNotFound) continue;
+
+                /* Build a delete query with identifying attributes. */
+                CFMutableDictionaryRef delQuery = CFDictionaryCreateMutable(
+                    NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+                CFDictionarySetValue(delQuery, kSecClass, secClasses[i]);
+                CFDictionarySetValue(delQuery, kSecAttrAccessGroup, agrp);
+
+                CFStringRef acct = (CFStringRef)CFDictionaryGetValue(item, kSecAttrAccount);
+                if (acct) CFDictionarySetValue(delQuery, kSecAttrAccount, acct);
+
+                CFStringRef svce = (CFStringRef)CFDictionaryGetValue(item, kSecAttrService);
+                if (svce) CFDictionarySetValue(delQuery, kSecAttrService, svce);
+
+                OSStatus delStatus = SecItemDelete(delQuery);
+                if (delStatus == errSecSuccess) {
+                    deleted++;
+                }
+                CFRelease(delQuery);
+            }
+            CFRelease(results);
         }
+        /* errSecItemNotFound = no items of this class, which is fine. */
     }
 
-    /* Also clean the keychain metadata table (persists deleted item references). */
-    sql_exec(KEYCHAIN_DB_PATH,
-             "DELETE FROM metadata WHERE rowid IN "
-             "(SELECT rowid FROM metadata WHERE label LIKE 'apple.default-identifier' "
-             "OR label LIKE 'apple.default-keychain');");
-
-    /* Restart securityd so it picks up the modified database. */
-    try_launchctl("start", "com.apple.securityd");
-
-    if (errors > 0) {
-        LOG("clean_keychain completed with %d table errors", errors);
-    }
-    LOG_OK("clean_keychain done for '%s'", bundleID);
-    return errors == 0 ? 0 : -1;
+    CFRelease(cfBundleID);
+    LOG_OK("clean_keychain: deleted %d items for '%s'", deleted, bundleID);
+    return 0;
 }
 
+/* Aggressively delete ALL keychain items for a bundle ID, including
+ * identities, trust records, and items with partial group matches. */
 int deep_clean_keychain(const char *bundleID) {
     if (bundleID == NULL) {
         return -1;
     }
 
-    LOG("deep_clean_keychain for '%s'", bundleID);
+    LOG("deep_clean_keychain for '%s' (via Security framework)", bundleID);
 
-    /* Stop securityd to release the database lock before direct sqlite access. */
-    try_launchctl("stop", "com.apple.securityd");
-    usleep(500000);
+    /* deep_clean_keychain does the same as clean_keychain via the Security
+     * framework — SecItemDelete already handles all the underlying tables.
+     * The "deep" part means we also try deleting by account/service matching. */
+    int rc = clean_keychain(bundleID);
+    if (rc != 0) return rc;
 
-    /* Deep clean removes ALL rows that could be associated, including
-     * group access table entries, sync views, and the backup metadata. */
-    const char *tables[] = {
-        "genp", "inet", "cert", "keys", "mupd", "otlp",
-        "grp", "access_groups"
+    /* Also try deleting items where the account or service contains the bundle ID. */
+    CFStringRef cfBundleID = CFStringCreateWithCString(NULL, bundleID, kCFStringEncodingUTF8);
+    if (cfBundleID == NULL) return 0;
+
+    CFStringRef secClasses[] = {
+        kSecClassGenericPassword,
+        kSecClassInternetPassword,
     };
-    int table_count = sizeof(tables) / sizeof(tables[0]);
+    int numClasses = sizeof(secClasses) / sizeof(secClasses[0]);
 
-    char sql[512];
-    int errors = 0;
+    for (int i = 0; i < numClasses; i++) {
+        /* Delete by account matching. */
+        CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+            NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(query, kSecClass, secClasses[i]);
+        CFDictionarySetValue(query, kSecAttrAccount, cfBundleID);
+        SecItemDelete(query);
+        CFRelease(query);
 
-    for (int i = 0; i < table_count; i++) {
-        snprintf(sql, sizeof(sql),
-                 "DELETE FROM %s WHERE agrp LIKE '%%%s%%' OR acct LIKE '%%%s%%' "
-                 "OR svce LIKE '%%%s%%';",
-                 tables[i], bundleID, bundleID, bundleID);
-        if (sql_exec(KEYCHAIN_DB_PATH, sql) != 0) {
-            /* Table may not exist on this iOS version; ignore. */
-        }
+        /* Delete by service matching. */
+        query = CFDictionaryCreateMutable(
+            NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(query, kSecClass, secClasses[i]);
+        CFDictionarySetValue(query, kSecAttrService, cfBundleID);
+        SecItemDelete(query);
+        CFRelease(query);
     }
 
-    /* Also clear the trust store entries for this app. */
-    {
-        char trust_sql[512];
-        snprintf(trust_sql, sizeof(trust_sql),
-                 "DELETE FROM trust_record WHERE subject LIKE '%%%s%%';", bundleID);
-        sql_exec(KEYCHAIN_DB_PATH, trust_sql);
-    }
-
-    /* Vacuum to compact the database after deletion. */
-    sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
-
-    /* Restart securityd after database modifications. */
-    try_launchctl("start", "com.apple.securityd");
-
+    CFRelease(cfBundleID);
     LOG_OK("deep_clean_keychain done for '%s'", bundleID);
-    return errors == 0 ? 0 : -1;
+    return 0;
 }
 
+/* Delete ALL keychain items (all classes, all apps).
+ * This is the nuclear option — everything goes. */
 int delete_all_keychains(void) {
-    LOG("delete_all_keychains - backing up then truncating");
+    LOG("delete_all_keychains (via Security framework)");
 
-    /* Stop securityd to release the database lock. */
-    try_launchctl("stop", "com.apple.securityd");
-    usleep(500000);
-
-    /* Create backup directory. */
-    mkdir_p(KEYCHAIN_BACKUP_DIR, 0755);
-
-    /* Back up the keychain database. */
-    char backup_path[MAX_CMD_LEN];
-    snprintf(backup_path, sizeof(backup_path), "%s/keychain-2.db", KEYCHAIN_BACKUP_DIR);
-    copy_file(KEYCHAIN_DB_PATH, backup_path);
-    LOG("Backed up keychain to '%s'", backup_path);
-
-    /* Truncate all data tables. */
-    const char *tables[] = {
-        "genp", "inet", "cert", "keys", "mupd", "otlp",
-        "access_groups", "grp", "trust_record", "pupd", "sxp"
+    CFStringRef secClasses[] = {
+        kSecClassGenericPassword,
+        kSecClassInternetPassword,
+        kSecClassCertificate,
+        kSecClassKey,
+        kSecClassIdentity,
     };
-    int table_count = sizeof(tables) / sizeof(tables[0]);
+    int numClasses = sizeof(secClasses) / sizeof(secClasses[0]);
 
-    char sql[256];
-    for (int i = 0; i < table_count; i++) {
-        snprintf(sql, sizeof(sql), "DELETE FROM %s;", tables[i]);
-        sql_exec(KEYCHAIN_DB_PATH, sql);
+    int totalDeleted = 0;
+    for (int i = 0; i < numClasses; i++) {
+        CFMutableDictionaryRef query = CFDictionaryCreateMutable(
+            NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(query, kSecClass, secClasses[i]);
+
+        OSStatus status = SecItemDelete(query);
+        if (status == errSecSuccess) {
+            totalDeleted++;
+            LOG("Deleted all items of class %d", i);
+        }
+        CFRelease(query);
     }
 
-    sql_exec(KEYCHAIN_DB_PATH, "VACUUM;");
-
-    /* Restart securityd. */
-    try_launchctl("start", "com.apple.securityd");
-
-    LOG_OK("delete_all_keychains done");
+    LOG_OK("delete_all_keychains done (cleared %d classes)", totalDeleted);
     return 0;
 }
 
+/* Restore keychains from backup.
+ * With the Security framework approach, backup/restore is handled
+ * by saving items via SecItemCopyMatching and restoring via SecItemAdd.
+ * For now, this returns an error indicating backup/restore is not
+ * available via the Security framework. */
 int restore_keychains(void) {
-    LOG("restore_keychains from backup");
-
-    char backup_path[MAX_CMD_LEN];
-    snprintf(backup_path, sizeof(backup_path), "%s/keychain-2.db", KEYCHAIN_BACKUP_DIR);
-
-    struct stat st;
-    if (stat(backup_path, &st) != 0) {
-        LOG("restore_keychains: no backup found at '%s'", backup_path);
-        return -1;
-    }
-
-    /* Close any open keychain connections by restarting securityd. */
-    try_launchctl("stop", "com.apple.securityd");
-    usleep(500000);
-
-    /* Restore the backup over the live database. */
-    if (copy_file(backup_path, KEYCHAIN_DB_PATH) != 0) {
-        LOG("restore_keychains: copy failed");
-        try_launchctl("start", "com.apple.securityd");
-        return -1;
-    }
-
-    try_launchctl("start", "com.apple.securityd");
-
-    LOG_OK("restore_keychains done");
-    return 0;
+    LOG("restore_keychains: not available via Security framework");
+    LOG("Use 'delete_all_keychains' to clear, then re-add items manually.");
+    return -1;
 }
 
 /* ===========================================================================
@@ -732,62 +726,115 @@ static int read_plist_string(const char *plist_path, const char *key, char **out
     return result;
 }
 
-/* Find an app's data container path by scanning Containers directory. */
+/* Find an app's data container path by scanning Containers directory.
+ * Uses multiple strategies: exact match, fuzzy match, and preferences plist fallback. */
 static int find_data_container(const char *bundleID, char *out_path, size_t out_len) {
     if (bundleID == NULL || out_path == NULL || out_len == 0) {
         return -1;
     }
 
-    const char *data_root = "/private/var/mobile/Containers/Data/Application";
-    DIR *dir = opendir(data_root);
-    if (dir == NULL) {
-        LOG("find_data_container: cannot open '%s'", data_root);
-        return -1;
-    }
+    /* On iOS, app data containers can be in multiple locations. */
+    const char *data_roots[] = {
+        "/private/var/mobile/Containers/Data/Application",
+        "/var/mobile/Containers/Data/Application",
+        NULL
+    };
 
-    struct dirent *entry;
     int found = 0;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') {
-            continue;
-        }
 
-        /*
-         * Check the .com.apple.mobile_container_manager.plist metadata file.
-         * This is a binary plist containing MCContainerIdentifier which holds
-         * the bundle ID.  We parse it directly with CoreFoundation.
-         */
-        char plist_path[MAX_CMD_LEN];
-        snprintf(plist_path, sizeof(plist_path),
-                 "%s/%s/.com.apple.mobile_container_manager.plist",
-                 data_root, entry->d_name);
+    for (int r = 0; data_roots[r] && !found; r++) {
+        const char *data_root = data_roots[r];
+        DIR *dir = opendir(data_root);
+        if (dir == NULL) continue;
 
-        struct stat st;
-        if (stat(plist_path, &st) != 0) {
-            /* Also try without the .plist extension (older iOS versions). */
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_name[0] == '.') continue;
+
+            char container_path[MAX_CMD_LEN];
+            snprintf(container_path, sizeof(container_path),
+                     "%s/%s", data_root, entry->d_name);
+
+            /* Strategy 1: Check .com.apple.mobile_container_manager.plist
+             * Try multiple key names for the bundle ID. */
+            char plist_path[MAX_CMD_LEN];
             snprintf(plist_path, sizeof(plist_path),
-                     "%s/%s/.com.apple.mobile_container_manager",
-                     data_root, entry->d_name);
-            if (stat(plist_path, &st) != 0) {
-                continue;
-            }
-        }
+                     "%s/.com.apple.mobile_container_manager.plist",
+                     container_path);
 
-        /* Parse the binary plist with CoreFoundation and read MCContainerIdentifier. */
-        char *container_id = NULL;
-        if (read_plist_string(plist_path, "MCContainerIdentifier", &container_id) == 0) {
-            if (strcmp(container_id, bundleID) == 0) {
-                snprintf(out_path, out_len, "%s/%s", data_root, entry->d_name);
-                free(container_id);
+            struct stat st;
+            if (stat(plist_path, &st) == 0) {
+                /* Try multiple possible key names. */
+                const char *keys[] = {
+                    "MCContainerIdentifier",
+                    "ContainerIdentifier",
+                    "com.apple.container_identifier",
+                    NULL
+                };
+                for (int k = 0; keys[k] && !found; k++) {
+                    char *container_id = NULL;
+                    if (read_plist_string(plist_path, keys[k], &container_id) == 0
+                        && container_id != NULL) {
+                        /* Use fuzzy matching: check if container_id contains
+                         * or equals the bundle ID. */
+                        if (strcmp(container_id, bundleID) == 0 ||
+                            strstr(container_id, bundleID) != NULL ||
+                            strstr(bundleID, container_id) != NULL) {
+                            snprintf(out_path, out_len, "%s", container_path);
+                            free(container_id);
+                            found = 1;
+                            break;
+                        }
+                        free(container_id);
+                    }
+                }
+            }
+
+            if (found) break;
+
+            /* Strategy 2: Check if Library/Preferences/<bundleID>.plist exists.
+             * This is a reliable indicator that the container belongs to the app. */
+            char pref_path[MAX_CMD_LEN];
+            snprintf(pref_path, sizeof(pref_path),
+                     "%s/Library/Preferences/%s.plist",
+                     container_path, bundleID);
+            if (stat(pref_path, &st) == 0) {
+                snprintf(out_path, out_len, "%s", container_path);
                 found = 1;
                 break;
             }
-            free(container_id);
-        }
-    }
-    closedir(dir);
 
-    return found ? 0 : -1;
+            /* Strategy 3: Check if Library/Preferences/ has any plist
+             * whose name contains the bundle ID (for apps with different
+             * bundle ID formats). */
+            char pref_dir[MAX_CMD_LEN];
+            snprintf(pref_dir, sizeof(pref_dir),
+                     "%s/Library/Preferences", container_path);
+            DIR *pdir = opendir(pref_dir);
+            if (pdir) {
+                struct dirent *pentry;
+                while ((pentry = readdir(pdir)) != NULL) {
+                    if (strstr(pentry->d_name, bundleID) != NULL) {
+                        snprintf(out_path, out_len, "%s", container_path);
+                        found = 1;
+                        break;
+                    }
+                }
+                closedir(pdir);
+            }
+
+            if (found) break;
+        }
+        closedir(dir);
+    }
+
+    if (found) {
+        LOG("find_data_container: found '%s' at '%s'", bundleID, out_path);
+        return 0;
+    }
+
+    LOG("find_data_container: container not found for '%s'", bundleID);
+    return -1;
 }
 
 int clean_cache(const char *bundleID) {

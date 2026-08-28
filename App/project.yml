@@ -95,7 +95,8 @@ targets:
               "${ROOTHELPER_SRC}" \
               -lsqlite3 \
               -framework Foundation \
-              -framework CoreFoundation
+              -framework CoreFoundation \
+              -framework Security
 
           chmod 755 "${ROOTHELPER_OUT}"
           echo " RootHelper binary built at: ${ROOTHELPER_OUT}"

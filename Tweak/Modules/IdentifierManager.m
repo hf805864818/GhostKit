@@ -11,7 +11,6 @@
 #import <AdSupport/AdSupport.h>
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
-#import <sqlite3.h>
 
 @implementation IdentifierManager
 
@@ -39,6 +38,9 @@
     // a new IDFA on next read.
 
     // 1. Security framework deletion by access group.
+    //    All keychain operations use the Security framework (SecItemDelete)
+    //    instead of direct SQLite access to keychain-2.db, which fails on
+    //    rootless jailbreaks / TrollStore.
     NSArray *accessGroups = @[
         @"com.apple.adid",
         @"com.apple.identifieradvertising",
@@ -47,44 +49,48 @@
         [[KeychainManager sharedInstance] cleanKeychainForBundleID:group];
     }
 
-    // 2. Direct DB deletion for the known access groups.
-    for (NSString *group in accessGroups) {
-        [[KeychainManager sharedInstance] deepCleanKeychainForBundleID:group];
-    }
+    // 2. Also delete by the well-known service names used by iOS.
+    //    Some IDFA items use these as the service attribute.
+    NSArray *serviceNames = @[
+        @"com.apple.adid",
+        @"adid",
+        @"com.apple.identifieradvertising",
+    ];
+    NSArray *secClasses = @[
+        (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecClassInternetPassword,
+    ];
 
-    // 3. Also delete by the well-known service name used by older iOS versions.
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2("/var/Keychains/keychain-2.db", &db,
-                        SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
-
-        const char *services[] = {
-            "com.apple.adid",
-            "adid",
-            "com.apple.identifieradvertising",
-            NULL,
-        };
-
-        NSArray *tables = @[@"genp", @"inet"];
-        for (NSString *table in tables) {
-            for (int i = 0; services[i] != NULL; i++) {
-                NSString *sql = [NSString stringWithFormat:
-                    @"DELETE FROM %@ WHERE srv = ? OR agrp = ?;", table];
-                sqlite3_stmt *stmt = NULL;
-                if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(stmt, 1, services[i], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(stmt, 2, services[i], -1, SQLITE_TRANSIENT);
-                    sqlite3_step(stmt);
-                    sqlite3_finalize(stmt);
-                }
-            }
+    for (id secClass in secClasses) {
+        for (NSString *service in serviceNames) {
+            NSDictionary *query = @{
+                (__bridge id)kSecClass:       secClass,
+                (__bridge id)kSecAttrService:  service,
+                (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitAll,
+            };
+            SecItemDelete((__bridge CFDictionaryRef)query);
         }
 
-        sqlite3_close(db);
+        // Also try deleting by account attribute.
+        for (NSString *acct in serviceNames) {
+            NSDictionary *query = @{
+                (__bridge id)kSecClass:       secClass,
+                (__bridge id)kSecAttrAccount:  acct,
+                (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitAll,
+            };
+            SecItemDelete((__bridge CFDictionaryRef)query);
+        }
     }
 
-    // 4. Clear the advertising identifier cache plist.
+    // 3. Clear the advertising identifier cache plist.
+    //    On iOS, delete the plist file directly — iOS will regenerate it
+    //    with default values on next access.
     NSString *cachePlist = @"/var/mobile/Library/Preferences/com.apple.adid.plist";
     [[NSFileManager defaultManager] removeItemAtPath:cachePlist error:nil];
+
+    // 4. Also clear the advertisingIdentifier preferences plist.
+    NSString *adPrefs = @"/var/mobile/Library/Preferences/com.apple.advertisingIdentifier.plist";
+    [[NSFileManager defaultManager] removeItemAtPath:adPrefs error:nil];
 
     NSLog(@"[GhostKit] refreshIDFA completed");
     return YES;

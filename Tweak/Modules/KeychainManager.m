@@ -2,16 +2,16 @@
 //  KeychainManager.m
 //  GhostKit
 //
-//  Implements keychain cleaning via the Security framework (SecItemDelete)
-//  and via direct sqlite3 manipulation of /var/Keychains/keychain-2.db.
+//  Implements keychain cleaning via the Security framework (SecItemDelete,
+//  SecItemCopyMatching, SecItemAdd).  All operations use the Security
+//  framework instead of direct SQLite access to keychain-2.db, which
+//  requires no root privileges and works on rootless jailbreaks / TrollStore.
 //
 
 #import "KeychainManager.h"
 #import <Security/Security.h>
-#import <sqlite3.h>
 
-static NSString *const kKeychainDBPath = @"/var/Keychains/keychain-2.db";
-static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
+static NSString *const kBackupDir = @"/var/mobile/Library/GhostKit/Backups";
 
 @implementation KeychainManager
 
@@ -24,6 +24,45 @@ static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
     return instance;
 }
 
+#pragma mark - Security framework helpers
+
+/// All keychain item classes we iterate over.
++ (NSArray *)allSecClasses {
+    return @[
+        (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecClassInternetPassword,
+        (__bridge id)kSecClassKey,
+        (__bridge id)kSecClassCertificate,
+        (__bridge id)kSecClassIdentity,
+    ];
+}
+
+/// Query all items of a given class, returning their attributes.
++ (NSArray *)queryAllItemsOfClass:(id)secClass {
+    NSDictionary *query = @{
+        (__bridge id)kSecClass:           secClass,
+        (__bridge id)kSecMatchLimit:      (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes: @YES,
+    };
+    CFArrayRef results = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&results);
+    if (status == errSecSuccess && results != NULL) {
+        NSArray *arr = (__bridge_transfer NSArray *)results;
+        return arr;
+    }
+    if (results) CFRelease(results);
+    return @[];
+}
+
+/// Check if an access group string contains or matches the bundle ID.
++ (BOOL)accessGroup:(NSString *)agrp matchesBundleID:(NSString *)bundleID {
+    if (!agrp || !bundleID) return NO;
+    if ([agrp isEqualToString:bundleID]) return YES;
+    if ([agrp containsString:bundleID]) return YES;
+    if ([bundleID containsString:agrp]) return YES;
+    return NO;
+}
+
 #pragma mark - Security framework clean
 
 - (BOOL)cleanKeychainForBundleID:(NSString *)bundleID {
@@ -31,18 +70,11 @@ static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
         return NO;
     }
 
-    NSArray *secItemClasses = @[
-        (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecClassInternetPassword,
-        (__bridge id)kSecClassKey,
-        (__bridge id)kSecClassCertificate,
-        (__bridge id)kSecClassIdentity,
-    ];
-
+    NSArray *secClasses = [KeychainManager allSecClasses];
     BOOL anyDeleted = NO;
 
-    for (id secClass in secItemClasses) {
-        // Delete by access group (bundle ID may appear as the access group).
+    for (id secClass in secClasses) {
+        // Strategy 1: Delete by access group (exact match).
         NSDictionary *groupQuery = @{
             (__bridge id)kSecClass:            secClass,
             (__bridge id)kSecAttrAccessGroup:  bundleID,
@@ -53,7 +85,7 @@ static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
             anyDeleted = YES;
         }
 
-        // Delete by service attribute (common when bundle ID is used as kSecAttrService).
+        // Strategy 2: Delete by service attribute.
         NSDictionary *serviceQuery = @{
             (__bridge id)kSecClass:       secClass,
             (__bridge id)kSecAttrService: bundleID,
@@ -63,82 +95,105 @@ static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
         if (status == errSecSuccess) {
             anyDeleted = YES;
         }
+
+        // Strategy 3: Query all items, find ones whose access group contains
+        // the bundle ID, and delete them individually.  This catches items
+        // where the access group is "TeamID.bundleID" format.
+        NSArray *allItems = [KeychainManager queryAllItemsOfClass:secClass];
+        for (NSDictionary *item in allItems) {
+            NSString *agrp = item[(__bridge id)kSecAttrAccessGroup];
+            if ([KeychainManager accessGroup:agrp matchesBundleID:bundleID]) {
+                // Build a delete query with the item's identifying attributes.
+                NSMutableDictionary *delQuery = [NSMutableDictionary dictionary];
+                delQuery[(__bridge id)kSecClass] = secClass;
+                if (agrp) delQuery[(__bridge id)kSecAttrAccessGroup] = agrp;
+
+                NSString *acct = item[(__bridge id)kSecAttrAccount];
+                if (acct) delQuery[(__bridge id)kSecAttrAccount] = acct;
+
+                NSString *svce = item[(__bridge id)kSecAttrService];
+                if (svce) delQuery[(__bridge id)kSecAttrService] = svce;
+
+                OSStatus delStatus = SecItemDelete((__bridge CFDictionaryRef)delQuery);
+                if (delStatus == errSecSuccess) {
+                    anyDeleted = YES;
+                }
+            }
+        }
     }
 
     NSLog(@"[GhostKit] cleanKeychainForBundleID:%@ -> %@", bundleID, anyDeleted ? @"YES" : @"NO");
     return anyDeleted;
 }
 
-#pragma mark - sqlite3 deep clean
+#pragma mark - Deep clean (Security framework)
 
 - (BOOL)deepCleanKeychainForBundleID:(NSString *)bundleID {
     if (!bundleID || bundleID.length == 0) {
         return NO;
     }
 
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2([kKeychainDBPath UTF8String], &db,
-                        SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        NSLog(@"[GhostKit] Cannot open keychain DB: %s", sqlite3_errmsg(db));
-        if (db) sqlite3_close(db);
-        return NO;
-    }
+    // First do the standard clean.
+    BOOL ok = [self cleanKeychainForBundleID:bundleID];
 
-    NSArray *tables = @[@"genp", @"inet", @"keys", @"cert"];
-    BOOL success = YES;
+    // Also delete items where the account name contains the bundle ID.
+    NSArray *secClasses = @[
+        (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecClassInternetPassword,
+    ];
 
-    for (NSString *table in tables) {
-        NSString *sql = [NSString stringWithFormat:
-            @"DELETE FROM %@ WHERE agrp = ?;", table];
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
-            if (sqlite3_step(stmt) != SQLITE_DONE) {
-                NSLog(@"[GhostKit] Failed to delete from %@: %s",
-                      table, sqlite3_errmsg(db));
-                success = NO;
-            }
-            sqlite3_finalize(stmt);
-        } else {
-            success = NO;
+    for (id secClass in secClasses) {
+        // Delete by account attribute.
+        NSDictionary *acctQuery = @{
+            (__bridge id)kSecClass:      secClass,
+            (__bridge id)kSecAttrAccount: bundleID,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+        };
+        OSStatus status = SecItemDelete((__bridge CFDictionaryRef)acctQuery);
+        if (status == errSecSuccess) {
+            ok = YES;
+        }
+
+        // Delete by service attribute (broader match).
+        NSDictionary *svcQuery = @{
+            (__bridge id)kSecClass:      secClass,
+            (__bridge id)kSecAttrService: bundleID,
+            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+        };
+        status = SecItemDelete((__bridge CFDictionaryRef)svcQuery);
+        if (status == errSecSuccess) {
+            ok = YES;
         }
     }
 
-    sqlite3_close(db);
-    NSLog(@"[GhostKit] deepCleanKeychainForBundleID:%@ -> %@", bundleID, success ? @"YES" : @"NO");
-    return success;
+    NSLog(@"[GhostKit] deepCleanKeychainForBundleID:%@ -> %@", bundleID, ok ? @"YES" : @"NO");
+    return ok;
 }
 
-#pragma mark - Delete all
+#pragma mark - Delete all (Security framework)
 
 - (BOOL)deleteAllKeychains {
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2([kKeychainDBPath UTF8String], &db,
-                        SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        NSLog(@"[GhostKit] Cannot open keychain DB: %s", sqlite3_errmsg(db));
-        if (db) sqlite3_close(db);
-        return NO;
-    }
+    NSArray *secClasses = [KeychainManager allSecClasses];
+    BOOL anyDeleted = NO;
 
-    NSArray *tables = @[@"genp", @"inet", @"keys", @"cert"];
-    BOOL success = YES;
-
-    for (NSString *table in tables) {
-        NSString *sql = [NSString stringWithFormat:@"DELETE FROM %@;", table];
-        char *errMsg = NULL;
-        if (sqlite3_exec(db, [sql UTF8String], NULL, NULL, &errMsg) != SQLITE_OK) {
-            NSLog(@"[GhostKit] Failed to clear %@: %s", table, errMsg);
-            if (errMsg) sqlite3_free(errMsg);
-            success = NO;
+    for (id secClass in secClasses) {
+        // Deleting with just the class and no other attributes removes ALL
+        // items of that class from the keychain.
+        NSDictionary *query = @{
+            (__bridge id)kSecClass: secClass,
+        };
+        OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+        if (status == errSecSuccess) {
+            anyDeleted = YES;
+            NSLog(@"[GhostKit] Deleted all items of class %@", secClass);
         }
     }
 
-    sqlite3_close(db);
-    NSLog(@"[GhostKit] deleteAllKeychains -> %@", success ? @"YES" : @"NO");
-    return success;
+    NSLog(@"[GhostKit] deleteAllKeychains -> %@", anyDeleted ? @"YES" : @"NO");
+    return anyDeleted;
 }
 
-#pragma mark - Backup
+#pragma mark - Backup (Security framework)
 
 - (NSString *)backupKeychainForBundleID:(NSString *)bundleID {
     if (!bundleID || bundleID.length == 0) {
@@ -153,53 +208,51 @@ static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
 
     NSString *timestamp = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970]];
     NSString *backupPath = [kBackupDir stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"keychain_%@_%@.db", bundleID, timestamp]];
+        [NSString stringWithFormat:@"keychain_%@_%@.plist", bundleID, timestamp]];
 
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2([kKeychainDBPath UTF8String], &db,
-                        SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        NSLog(@"[GhostKit] Cannot open keychain DB for backup: %s", sqlite3_errmsg(db));
-        if (db) sqlite3_close(db);
-        return nil;
-    }
+    NSMutableArray *backupItems = [NSMutableArray array];
+    NSArray *secClasses = [KeychainManager allSecClasses];
 
-    // Attach the backup database.
-    NSString *attachSQL = [NSString stringWithFormat:@"ATTACH DATABASE '%@' AS backup;", backupPath];
-    char *errMsg = NULL;
-    if (sqlite3_exec(db, [attachSQL UTF8String], NULL, NULL, &errMsg) != SQLITE_OK) {
-        NSLog(@"[GhostKit] ATTACH failed: %s", errMsg);
-        if (errMsg) sqlite3_free(errMsg);
-        sqlite3_close(db);
-        return nil;
-    }
-
-    NSArray *tables = @[@"genp", @"inet", @"keys", @"cert"];
-
-    for (NSString *table in tables) {
-        // Create the table in the backup DB using the same schema (no rows).
-        NSString *createSQL = [NSString stringWithFormat:
-            @"CREATE TABLE IF NOT EXISTS backup.%@ AS SELECT * FROM %@ WHERE 0;", table, table];
-        sqlite3_exec(db, [createSQL UTF8String], NULL, NULL, NULL);
-
-        // Insert matching rows.
-        NSString *insertSQL = [NSString stringWithFormat:
-            @"INSERT INTO backup.%@ SELECT * FROM %@ WHERE agrp = ?;", table, table];
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(db, [insertSQL UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
+    for (id secClass in secClasses) {
+        // Query all items of this class with both attributes and data.
+        NSDictionary *query = @{
+            (__bridge id)kSecClass:            secClass,
+            (__bridge id)kSecMatchLimit:        (__bridge id)kSecMatchLimitAll,
+            (__bridge id)kSecReturnAttributes:  @YES,
+            (__bridge id)kSecReturnData:        @YES,
+        };
+        CFArrayRef results = NULL;
+        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&results);
+        if (status == errSecSuccess && results != NULL) {
+            NSArray *items = (__bridge_transfer NSArray *)results;
+            for (NSDictionary *item in items) {
+                NSString *agrp = item[(__bridge id)kSecAttrAccessGroup];
+                if ([KeychainManager accessGroup:agrp matchesBundleID:bundleID]) {
+                    // Serialize the item for backup.
+                    NSMutableDictionary *serialized = [item mutableCopy];
+                    // Store the class string for later restoration.
+                    serialized[@"__secClass"] = [NSString stringWithFormat:@"%lu", (unsigned long)[secClass hash]];
+                    [backupItems addObject:serialized];
+                }
+            }
+        } else if (results) {
+            CFRelease(results);
         }
     }
 
-    sqlite3_exec(db, "DETACH DATABASE backup;", NULL, NULL, NULL);
-    sqlite3_close(db);
+    // Write the backup to a plist file.
+    NSDictionary *backup = @{
+        @"bundleID": bundleID,
+        @"timestamp": timestamp,
+        @"items": backupItems,
+    };
+    [backup writeToFile:backupPath atomically:YES];
 
-    NSLog(@"[GhostKit] Backup created at %@", backupPath);
+    NSLog(@"[GhostKit] Backup created at %@ (%lu items)", backupPath, (unsigned long)backupItems.count);
     return backupPath;
 }
 
-#pragma mark - Restore
+#pragma mark - Restore (Security framework)
 
 - (BOOL)restoreKeychainFromBackup:(NSString *)backupPath {
     if (!backupPath || backupPath.length == 0) {
@@ -212,60 +265,82 @@ static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
         return NO;
     }
 
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2([kKeychainDBPath UTF8String], &db,
-                        SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        NSLog(@"[GhostKit] Cannot open keychain DB for restore: %s", sqlite3_errmsg(db));
-        if (db) sqlite3_close(db);
+    NSDictionary *backup = [NSDictionary dictionaryWithContentsOfFile:backupPath];
+    if (!backup) {
+        NSLog(@"[GhostKit] Cannot read backup file: %@", backupPath);
         return NO;
     }
 
-    NSString *attachSQL = [NSString stringWithFormat:
-        @"ATTACH DATABASE '%@' AS backup;", backupPath];
-    char *errMsg = NULL;
-    if (sqlite3_exec(db, [attachSQL UTF8String], NULL, NULL, &errMsg) != SQLITE_OK) {
-        NSLog(@"[GhostKit] ATTACH failed: %s", errMsg);
-        if (errMsg) sqlite3_free(errMsg);
-        sqlite3_close(db);
-        return NO;
+    NSArray *items = backup[@"items"];
+    if (!items || items.count == 0) {
+        NSLog(@"[GhostKit] No items in backup");
+        return YES;
     }
 
-    NSArray *tables = @[@"genp", @"inet", @"keys", @"cert"];
-    BOOL success = YES;
+    NSArray *secClasses = [KeychainManager allSecClasses];
+    BOOL anyRestored = NO;
 
-    for (NSString *table in tables) {
-        // Check whether the backup table exists.
-        NSString *checkSQL = [NSString stringWithFormat:
-            @"SELECT name FROM backup.sqlite_master WHERE type='table' AND name='%@';", table];
-        sqlite3_stmt *chkStmt = NULL;
-        BOOL tableExists = NO;
-        if (sqlite3_prepare_v2(db, [checkSQL UTF8String], -1, &chkStmt, NULL) == SQLITE_OK) {
-            if (sqlite3_step(chkStmt) == SQLITE_ROW) {
-                tableExists = YES;
+    for (NSDictionary *item in items) {
+        // Determine the item class from the stored index.
+        NSString *classHashStr = item[@"__secClass"];
+        NSUInteger classHash = classHashStr ? [classHashStr integerValue] : 0;
+
+        id secClass = nil;
+        for (id sc in secClasses) {
+            if ((NSUInteger)[sc hash] == classHash) {
+                secClass = sc;
+                break;
             }
-            sqlite3_finalize(chkStmt);
+        }
+        if (!secClass) {
+            // Default to generic password if class not found.
+            secClass = (__bridge id)kSecClassGenericPassword;
         }
 
-        if (tableExists) {
-            NSString *insertSQL = [NSString stringWithFormat:
-                @"INSERT INTO %@ SELECT * FROM backup.%@;", table, table];
-            char *err = NULL;
-            if (sqlite3_exec(db, [insertSQL UTF8String], NULL, NULL, &err) != SQLITE_OK) {
-                NSLog(@"[GhostKit] Restore error for %@: %s", table, err);
-                if (err) sqlite3_free(err);
-                success = NO;
+        // Build an add query from the item's attributes and data.
+        NSMutableDictionary *addQuery = [NSMutableDictionary dictionary];
+        addQuery[(__bridge id)kSecClass] = secClass;
+
+        // Copy relevant attributes.
+        NSArray *attrKeys = @[
+            (__bridge id)kSecAttrAccessGroup,
+            (__bridge id)kSecAttrAccount,
+            (__bridge id)kSecAttrService,
+            (__bridge id)kSecAttrLabel,
+            (__bridge id)kSecAttrServer,
+            (__bridge id)kSecAttrProtocol,
+            (__bridge id)kSecAttrAuthenticationType,
+            (__bridge id)kSecAttrPort,
+            (__bridge id)kSecAttrPath,
+            (__bridge id)kSecAttrCreationDate,
+            (__bridge id)kSecAttrModificationDate,
+            (__bridge id)kSecAttrDescription,
+            (__bridge id)kSecAttrComment,
+        ];
+        for (id key in attrKeys) {
+            id val = item[key];
+            if (val) {
+                addQuery[key] = val;
             }
+        }
+
+        // Add the data value.
+        NSData *valueData = item[(__bridge id)kSecValueData];
+        if (valueData) {
+            addQuery[(__bridge id)kSecValueData] = valueData;
+        }
+
+        OSStatus status = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+        if (status == errSecSuccess) {
+            anyRestored = YES;
         }
     }
 
-    sqlite3_exec(db, "DETACH DATABASE backup;", NULL, NULL, NULL);
-    sqlite3_close(db);
-
-    NSLog(@"[GhostKit] restoreKeychainFromBackup:%@ -> %@", backupPath, success ? @"YES" : @"NO");
-    return success;
+    NSLog(@"[GhostKit] restoreKeychainFromBackup:%@ -> %@", backupPath, anyRestored ? @"YES" : @"NO");
+    return anyRestored;
 }
 
-#pragma mark - List
+#pragma mark - List (Security framework)
 
 - (NSArray<NSDictionary *> *)listKeychainItemsForBundleID:(NSString *)bundleID {
     NSMutableArray *items = [NSMutableArray array];
@@ -273,48 +348,39 @@ static NSString *const kBackupDir     = @"/var/mobile/Library/GhostKit/Backups";
         return items;
     }
 
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2([kKeychainDBPath UTF8String], &db,
-                        SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        NSLog(@"[GhostKit] Cannot open keychain DB for listing: %s", sqlite3_errmsg(db));
-        if (db) sqlite3_close(db);
-        return items;
-    }
+    NSArray *secClasses = [KeychainManager allSecClasses];
 
-    // (table, descriptive column)
-    NSArray *tableInfo = @[
-        @[@"genp", @"srv"],   // generic passwords
-        @[@"inet", @"srv"],   // internet passwords
-        @[@"keys", @"klbl"],  // keys
-        @[@"cert", @"labl"],  // certificates
-    ];
+    // Class display names for the result.
+    NSDictionary *classNames = @{
+        (__bridge id)kSecClassGenericPassword: @"GenericPassword",
+        (__bridge id)kSecClassInternetPassword: @"InternetPassword",
+        (__bridge id)kSecClassKey: @"Key",
+        (__bridge id)kSecClassCertificate: @"Certificate",
+        (__bridge id)kSecClassIdentity: @"Identity",
+    };
 
-    for (NSArray *info in tableInfo) {
-        NSString *table  = info[0];
-        NSString *column = info[1];
-        NSString *sql = [NSString stringWithFormat:
-            @"SELECT agrp, %@, length(data) FROM %@ WHERE agrp = ?;", column, table];
-
-        sqlite3_stmt *stmt = NULL;
-        if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                const char *agrp = (const char *)sqlite3_column_text(stmt, 0);
-                const char *srv  = (const char *)sqlite3_column_text(stmt, 1);
-                int dataLen      = sqlite3_column_int(stmt, 2);
+    for (id secClass in secClasses) {
+        NSArray *allItems = [KeychainManager queryAllItemsOfClass:secClass];
+        for (NSDictionary *item in allItems) {
+            NSString *agrp = item[(__bridge id)kSecAttrAccessGroup];
+            if ([KeychainManager accessGroup:agrp matchesBundleID:bundleID]) {
+                NSString *service = item[(__bridge id)kSecAttrService] ?:
+                                    item[(__bridge id)kSecAttrServer] ?: @"";
+                NSString *account = item[(__bridge id)kSecAttrAccount] ?: @"";
+                NSString *className = classNames[secClass] ?: @"Unknown";
 
                 [items addObject:@{
-                    @"table":       table,
-                    @"accessGroup": agrp ? [NSString stringWithUTF8String:agrp] : @"",
-                    @"service":     srv  ? [NSString stringWithUTF8String:srv]  : @"",
-                    @"dataLength":  @(dataLen),
+                    @"class":        className,
+                    @"accessGroup":  agrp ?: @"",
+                    @"service":      service,
+                    @"account":      account,
                 }];
             }
-            sqlite3_finalize(stmt);
         }
     }
 
-    sqlite3_close(db);
+    NSLog(@"[GhostKit] listKeychainItemsForBundleID:%@ -> %lu items",
+          bundleID, (unsigned long)items.count);
     return items;
 }
 

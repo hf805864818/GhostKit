@@ -3,6 +3,9 @@
 //  GhostKit
 //
 //  Keychain management: clean, deep-clean, backup, restore, list.
+//  All operations use the Security framework (SecItemDelete / SecItemCopyMatching /
+//  SecItemAdd) instead of direct SQLite access to keychain-2.db, which works on
+//  rootless jailbreaks and TrollStore without root privileges.
 //
 
 #import <Foundation/Foundation.h>
@@ -14,20 +17,20 @@
 /// Delete keychain items for the given bundle ID using the Security framework.
 - (BOOL)cleanKeychainForBundleID:(NSString *)bundleID;
 
-/// Deep-clean keychain items by directly operating on /var/Keychains/keychain-2.db.
+/// Deep-clean keychain items by access group, service, and account matching.
 - (BOOL)deepCleanKeychainForBundleID:(NSString *)bundleID;
 
-/// Wipe every row from all keychain tables.
+/// Wipe all keychain items (all classes, all apps).
 - (BOOL)deleteAllKeychains;
 
-/// Restore previously backed-up keychain rows from a .db file.
-- (BOOL)restoreKeychainFromBackup:(NSString *)backupPath;
-
-/// Back up keychain rows whose access group matches bundleID to a .db file.
+/// Back up keychain items matching bundleID to a .plist file.
 /// Returns the path to the backup file, or nil on failure.
 - (NSString *)backupKeychainForBundleID:(NSString *)bundleID;
 
-/// List keychain items (service / label / data length) whose access group matches bundleID.
+/// Restore previously backed-up keychain items from a .plist file.
+- (BOOL)restoreKeychainFromBackup:(NSString *)backupPath;
+
+/// List keychain items (class / access group / service / account) matching bundleID.
 - (NSArray<NSDictionary *> *)listKeychainItemsForBundleID:(NSString *)bundleID;
 
 @end

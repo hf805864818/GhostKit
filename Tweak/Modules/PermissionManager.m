@@ -6,9 +6,12 @@
 //  /var/mobile/Library/TCC/TCC.db to grant pasteboard (kTCCServicePasteboard)
 //  permissions.
 //
-//  The `access` table columns (iOS 16+):
-//    service, client, client_type, auth_value, auth_reason,
-//    auth_version, bootstrap, ... (schema varies by iOS version)
+//  On rootless jailbreaks (RelaXin/Dopamine) and TrollStore, the Tweak
+//  process may not have sufficient privileges to directly modify TCC.db.
+//  We try multiple strategies:
+//    1. Stop tccd (try multiple binary paths for rootless jailbreaks)
+//    2. Open TCC.db with sqlite3_busy_timeout to wait for locks
+//    3. If SQLite open fails, return NO with a clear error
 //
 
 #import "PermissionManager.h"
@@ -16,6 +19,7 @@
 #import <sqlite3.h>
 #import <spawn.h>
 #import <sys/wait.h>
+#import <unistd.h>
 
 extern char **environ;
 
@@ -33,23 +37,72 @@ static NSString *const kPasteboardService = @"kTCCServicePasteboard";
     return instance;
 }
 
+#pragma mark - Binary path search (rootless compatible)
+
+/// Find an executable binary by trying multiple paths on iOS.
+/// On rootless jailbreaks, binaries are at /var/jb/bin/ instead of /usr/bin/.
+- (NSString *)findBinary:(NSString *)name {
+    NSArray *paths = @[
+        [NSString stringWithFormat:@"/var/jb/bin/%@", name],
+        [NSString stringWithFormat:@"/usr/bin/%@", name],
+        [NSString stringWithFormat:@"/bin/%@", name],
+    ];
+    for (NSString *path in paths) {
+        if (access([path UTF8String], X_OK) == 0) {
+            return path;
+        }
+    }
+    return nil;
+}
+
+/// Spawn a binary with the given arguments. Returns the exit status.
+- (int)spawnBinary:(NSString *)path withArgs:(NSArray<NSString *> *)args {
+    if (!path) return -1;
+
+    // Build C argv array.
+    int argc = (int)(1 + args.count + 1);
+    char **argv = (char **)malloc(sizeof(char *) * argc);
+    if (!argv) return -1;
+
+    argv[0] = strdup([path UTF8String]);
+    for (NSUInteger i = 0; i < args.count; i++) {
+        argv[i + 1] = strdup([args[i] UTF8String]);
+    }
+    argv[argc - 1] = NULL;
+
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, [path UTF8String], NULL, NULL, argv, environ);
+
+    // Free argv.
+    for (int i = 0; i < argc - 1; i++) {
+        if (argv[i]) free(argv[i]);
+    }
+    free(argv);
+
+    if (rc != 0) return -1;
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 #pragma mark - tccd helpers
 
 /// Stop tccd so it releases the lock on TCC.db.
-/// Without this, sqlite3_open / sqlite3_exec fail because
-/// tccd holds a lock on the database file.
 - (void)stopTCCD {
-    pid_t pid = 0;
-    char *argv[] = { "killall", "-9", "tccd", NULL };
-    posix_spawnp(&pid, "killall", NULL, NULL, argv, environ);
-    usleep(300000);  // 0.3s
+    NSString *killallPath = [self findBinary:@"killall"];
+    if (killallPath) {
+        [self spawnBinary:killallPath withArgs:@[@"-9", @"tccd"]];
+    }
+    usleep(300000);  // 0.3s for tccd to release the lock
 }
 
 /// Restart tccd after database modifications.
 - (void)startTCCD {
-    pid_t pid = 0;
-    char *argv[] = { "launchctl", "start", "com.apple.tccd", NULL };
-    posix_spawnp(&pid, "launchctl", NULL, NULL, argv, environ);
+    NSString *launchctlPath = [self findBinary:@"launchctl"];
+    if (launchctlPath) {
+        [self spawnBinary:launchctlPath withArgs:@[@"start", @"com.apple.tccd"]];
+    }
 }
 
 #pragma mark - TCC helpers
@@ -61,74 +114,51 @@ static const int kClientTypeBundleID = 0;
 /// auth_reason: 4 = user set (pre-granted)
 static const int kAuthReasonUserSet = 4;
 
-- (BOOL)executeSQL:(NSString *)sql withBindings:(NSArray *)bindings {
-    [self stopTCCD];
-
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2([kTCCDBPath UTF8String], &db,
-                        SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        NSLog(@"[GhostKit] Cannot open TCC.db: %s", sqlite3_errmsg(db));
-        if (db) sqlite3_close(db);
-        [self startTCCD];
-        return NO;
-    }
-
-    sqlite3_stmt *stmt = NULL;
-    BOOL success = NO;
-
-    if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
-        for (NSUInteger i = 0; i < bindings.count; i++) {
-            sqlite3_bind_text(stmt, (int)(i + 1),
-                              [bindings[i] UTF8String], -1, SQLITE_TRANSIENT);
-        }
-        if (sqlite3_step(stmt) == SQLITE_DONE) {
-            success = YES;
-        } else {
-            NSLog(@"[GhostKit] SQL step error: %s", sqlite3_errmsg(db));
-        }
-        sqlite3_finalize(stmt);
-    } else {
-        NSLog(@"[GhostKit] SQL prepare error: %s", sqlite3_errmsg(db));
-    }
-
-    sqlite3_close(db);
-    [self startTCCD];
-    return success;
-}
-
 - (BOOL)grantPasteForBundleID:(NSString *)bundleID {
+    if (!bundleID || bundleID.length == 0) return NO;
+
     [self stopTCCD];
-
-    // First try to delete any existing entry, then insert a fresh one.
-    NSString *deleteSQL = @"DELETE FROM access WHERE service = ? AND client = ?;";
-    [self executeSQL:deleteSQL withBindings:@[kPasteboardService, bundleID]];
-
-    // INSERT OR REPLACE to handle the case where a row already exists.
-    NSString *insertSQL =
-        @"INSERT OR REPLACE INTO access "
-         "(service, client, client_type, auth_value, auth_reason, auth_version, "
-         "  flags, TTL, TTL_type) "
-         "VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0);";
 
     sqlite3 *db = NULL;
     if (sqlite3_open_v2([kTCCDBPath UTF8String], &db,
                         SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        NSLog(@"[GhostKit] Cannot open TCC.db: %s", sqlite3_errmsg(db));
+        NSLog(@"[GhostKit] Cannot open TCC.db: %s", db ? sqlite3_errmsg(db) : "null");
         if (db) sqlite3_close(db);
         [self startTCCD];
         return NO;
     }
 
-    sqlite3_stmt *stmt = NULL;
+    // Wait up to 5s if TCC.db is locked by tccd.
+    sqlite3_busy_timeout(db, 5000);
+
+    // First, delete any existing entry for this bundle ID.
+    sqlite3_stmt *delStmt = NULL;
+    const char *deleteSQL = "DELETE FROM access WHERE service = ? AND client = ?;";
+    if (sqlite3_prepare_v2(db, deleteSQL, -1, &delStmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(delStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(delStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
+        sqlite3_step(delStmt);
+        sqlite3_finalize(delStmt);
+    }
+
+    // Insert the permission row.
+    // Try the full schema first, then fall back to a simpler one.
     BOOL success = NO;
 
-    if (sqlite3_prepare_v2(db, [insertSQL UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
+    const char *insertSQL =
+        "INSERT OR REPLACE INTO access "
+        "(service, client, client_type, auth_value, auth_reason, auth_version, "
+        " flags, TTL, TTL_type) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0);";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, insertSQL, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 3, kClientTypeBundleID);
         sqlite3_bind_int(stmt, 4, kAuthValueAllowed);
         sqlite3_bind_int(stmt, 5, kAuthReasonUserSet);
-        sqlite3_bind_int(stmt, 6, 1); // auth_version
+        sqlite3_bind_int(stmt, 6, 1);
 
         if (sqlite3_step(stmt) == SQLITE_DONE) {
             success = YES;
@@ -137,12 +167,12 @@ static const int kAuthReasonUserSet = 4;
         }
         sqlite3_finalize(stmt);
     } else {
-        // The table schema may differ. Try a simpler INSERT with fewer columns.
-        NSString *simpleSQL =
-            @"INSERT OR REPLACE INTO access (service, client, client_type, auth_value) "
-             "VALUES (?, ?, ?, ?);";
+        // The table schema may differ. Try a simpler INSERT.
+        const char *simpleSQL =
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value) "
+            "VALUES (?, ?, ?, ?);";
 
-        if (sqlite3_prepare_v2(db, [simpleSQL UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_prepare_v2(db, simpleSQL, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
             sqlite3_bind_int(stmt, 3, kClientTypeBundleID);
@@ -172,78 +202,86 @@ static const int kAuthReasonUserSet = 4;
     // Stop tccd once for the entire batch, then restart after.
     [self stopTCCD];
 
-    BOOL allSuccess = YES;
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2([kTCCDBPath UTF8String], &db,
+                        SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+        NSLog(@"[GhostKit] Cannot open TCC.db for batch paste: %s",
+              db ? sqlite3_errmsg(db) : "null");
+        if (db) sqlite3_close(db);
+        [self startTCCD];
+        return NO;
+    }
+
+    sqlite3_busy_timeout(db, 5000);
+
     NSUInteger count = 0;
+    BOOL anySuccess = NO;
 
     for (AppInfo *info in apps) {
-        // Inline the grant logic to avoid stopping/starting tccd per app.
         NSString *bundleID = info.bundleID;
+        if (!bundleID || bundleID.length == 0) continue;
 
         // Delete existing entry.
-        NSString *deleteSQL = @"DELETE FROM access WHERE service = ? AND client = ?;";
-        // Use a local db handle to avoid recursion into executeSQL:.
-        sqlite3 *db = NULL;
-        if (sqlite3_open_v2([kTCCDBPath UTF8String], &db,
-                            SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
-            sqlite3_stmt *delStmt = NULL;
-            if (sqlite3_prepare_v2(db, [deleteSQL UTF8String], -1, &delStmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(delStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(delStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_step(delStmt);
-                sqlite3_finalize(delStmt);
-            }
+        sqlite3_stmt *delStmt = NULL;
+        const char *deleteSQL = "DELETE FROM access WHERE service = ? AND client = ?;";
+        if (sqlite3_prepare_v2(db, deleteSQL, -1, &delStmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(delStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(delStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
+            sqlite3_step(delStmt);
+            sqlite3_finalize(delStmt);
+        }
 
-            // Insert.
-            NSString *insertSQL =
-                @"INSERT OR REPLACE INTO access "
-                 "(service, client, client_type, auth_value, auth_reason, auth_version, "
-                 "  flags, TTL, TTL_type) "
-                 "VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0);";
-            sqlite3_stmt *insStmt = NULL;
-            if (sqlite3_prepare_v2(db, [insertSQL UTF8String], -1, &insStmt, NULL) == SQLITE_OK) {
-                sqlite3_bind_text(insStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(insStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int(insStmt, 3, kClientTypeBundleID);
-                sqlite3_bind_int(insStmt, 4, kAuthValueAllowed);
-                sqlite3_bind_int(insStmt, 5, kAuthReasonUserSet);
-                sqlite3_bind_int(insStmt, 6, 1);
+        // Insert. Try full schema, then simpler.
+        const char *insertSQL =
+            "INSERT OR REPLACE INTO access "
+            "(service, client, client_type, auth_value, auth_reason, auth_version, "
+            " flags, TTL, TTL_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0);";
 
-                if (sqlite3_step(insStmt) == SQLITE_DONE) {
-                    count++;
-                } else {
-                    allSuccess = NO;
-                }
-                sqlite3_finalize(insStmt);
-            } else {
-                // Try simpler schema.
-                NSString *simpleSQL =
-                    @"INSERT OR REPLACE INTO access (service, client, client_type, auth_value) "
-                     "VALUES (?, ?, ?, ?);";
-                sqlite3_stmt *simpleStmt = NULL;
-                if (sqlite3_prepare_v2(db, [simpleSQL UTF8String], -1, &simpleStmt, NULL) == SQLITE_OK) {
-                    sqlite3_bind_text(simpleStmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(simpleStmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_int(simpleStmt, 3, kClientTypeBundleID);
-                    sqlite3_bind_int(simpleStmt, 4, kAuthValueAllowed);
-                    if (sqlite3_step(simpleStmt) == SQLITE_DONE) count++;
-                    else allSuccess = NO;
-                    sqlite3_finalize(simpleStmt);
-                } else {
-                    allSuccess = NO;
-                }
+        sqlite3_stmt *stmt = NULL;
+        BOOL inserted = NO;
+
+        if (sqlite3_prepare_v2(db, insertSQL, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 3, kClientTypeBundleID);
+            sqlite3_bind_int(stmt, 4, kAuthValueAllowed);
+            sqlite3_bind_int(stmt, 5, kAuthReasonUserSet);
+            sqlite3_bind_int(stmt, 6, 1);
+
+            if (sqlite3_step(stmt) == SQLITE_DONE) {
+                inserted = YES;
             }
-            sqlite3_close(db);
-        } else {
-            allSuccess = NO;
-            if (db) sqlite3_close(db);
+            sqlite3_finalize(stmt);
+        }
+
+        if (!inserted) {
+            // Try simpler schema.
+            const char *simpleSQL =
+                "INSERT OR REPLACE INTO access (service, client, client_type, auth_value) "
+                "VALUES (?, ?, ?, ?);";
+            if (sqlite3_prepare_v2(db, simpleSQL, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(stmt, 3, kClientTypeBundleID);
+                sqlite3_bind_int(stmt, 4, kAuthValueAllowed);
+                if (sqlite3_step(stmt) == SQLITE_DONE) inserted = YES;
+                sqlite3_finalize(stmt);
+            }
+        }
+
+        if (inserted) {
+            count++;
+            anySuccess = YES;
         }
     }
 
+    sqlite3_close(db);
     [self startTCCD];
 
     NSLog(@"[GhostKit] allowPasteForAllApps: %lu / %lu granted",
           (unsigned long)count, (unsigned long)apps.count);
-    return allSuccess;
+    return anySuccess;
 }
 
 #pragma mark - Is paste allowed
@@ -260,11 +298,13 @@ static const int kAuthReasonUserSet = 4;
         return NO;
     }
 
-    NSString *sql = @"SELECT auth_value FROM access WHERE service = ? AND client = ?;";
+    sqlite3_busy_timeout(db, 3000);
+
+    const char *sql = "SELECT auth_value FROM access WHERE service = ? AND client = ?;";
     sqlite3_stmt *stmt = NULL;
     BOOL allowed = NO;
 
-    if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &stmt, NULL) == SQLITE_OK) {
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, [kPasteboardService UTF8String], -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, [bundleID UTF8String], -1, SQLITE_TRANSIENT);
 
