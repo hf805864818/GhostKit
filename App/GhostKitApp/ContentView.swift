@@ -100,39 +100,41 @@ struct ContentView: View {
 
     var body: some View {
         NavigationView {
-            listContent
-                .navigationTitle("GhostKit")
-                .toolbar { toolbarContent }
-                .searchable(text: $appManager.searchText,
-                            placement: .navigationBarDrawer(displayMode: .always),
-                            prompt: "搜索应用")
-                .confirmationDialog(
-                    selectedApp?.name ?? "",
-                    isPresented: $showingActionSheet,
-                    titleVisibility: .visible
-                ) {
-                    mainActionSheetButtons
-                }
-                .confirmationDialog(
-                    "高级选项",
-                    isPresented: $showingAdvancedSheet,
-                    titleVisibility: .visible
-                ) {
-                    advancedActionSheetButtons
-                }
-                .sheet(isPresented: $showingSettings) { SettingsView() }
-                .sheet(isPresented: $showingDeviceInfo) { DeviceInfoView() }
-                .sheet(isPresented: $showingAccounts) { AccountListView() }
-                .sheet(isPresented: $showingGraphics) { GraphicsConfigView() }
-                .overlay { loadingOverlay }
-                .toast($toast)
-                .alert(item: $errorAlert) { alert in
-                    Alert(
-                        title: Text(alert.title),
-                        message: Text(alert.message),
-                        dismissButton: .default(Text("确定"))
-                    )
-                }
+            ZStack {
+                listContent
+            }
+            .navigationTitle("GhostKit")
+            .toolbar { toolbarContent }
+            .searchable(text: $appManager.searchText,
+                        placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "搜索应用")
+            .confirmationDialog(
+                selectedApp?.name ?? "",
+                isPresented: $showingActionSheet,
+                titleVisibility: .visible
+            ) {
+                mainActionSheetButtons
+            }
+            .confirmationDialog(
+                "高级选项",
+                isPresented: $showingAdvancedSheet,
+                titleVisibility: .visible
+            ) {
+                advancedActionSheetButtons
+            }
+            .sheet(isPresented: $showingSettings) { SettingsView() }
+            .sheet(isPresented: $showingDeviceInfo) { DeviceInfoView() }
+            .sheet(isPresented: $showingAccounts) { AccountListView() }
+            .sheet(isPresented: $showingGraphics) { GraphicsConfigView() }
+            .overlay { loadingOverlay }
+            .toast($toast)
+            .alert(item: $errorAlert) { alert in
+                Alert(
+                    title: Text(alert.title),
+                    message: Text(alert.message),
+                    dismissButton: .default(Text("确定"))
+                )
+            }
         }
         .navigationViewStyle(.stack)
         .onAppear {
