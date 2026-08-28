@@ -104,11 +104,12 @@
     if (!ip || ip.section == 0) return;
     NSInteger row = ip.row - 1;
     if (row < 0 || row >= self.appList.count) return;
-    NSMutableDictionary *app = self.appList[row];
+    NSMutableDictionary *app = [self.appList[row] mutableCopy];
     NSString *bid = app[@"bid"] ?: @"";
     app[@"enabled"] = @(sw.isOn);
+    self.appList[row] = app;
     [[OverlayController sharedInstance] setEnabled:sw.isOn forBundleID:bid];
-    NSLog(@"[GhostKit] %s overlay for %@", sw.isOn ? @"ENABLED" : @"DISABLED", bid);
+    NSLog(@"[GhostKit] %@ overlay for %@", sw.isOn ? @"ENABLED" : @"DISABLED", bid);
 }
 
 @end
