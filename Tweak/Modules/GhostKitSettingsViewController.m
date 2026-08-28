@@ -3,12 +3,12 @@
 #import "AppListManager.h"
 #import <UIKit/UIKit.h>
 
-@interface GhostKitSettingsVC () <UITableViewDataSource, UITableViewDelegate>
+@interface GhostKitSettingsViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *appList;
 @end
 
-@implementation GhostKitSettingsVC
+@implementation GhostKitSettingsViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];

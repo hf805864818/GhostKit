@@ -59,7 +59,7 @@ public class RootHelperManager: ObservableObject {
     // MARK: - Methods
     
     /// Execute RootHelper with given arguments
-    public func execute(_ args: String...) -> RootHelperResult {
+    public func execute(_ args: [String]) -> RootHelperResult {
         // Implementation uses posix_spawn to run RootHelper binary
         // For now, return a placeholder result
         return .success
