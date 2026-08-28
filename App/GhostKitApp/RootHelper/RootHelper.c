@@ -36,6 +36,14 @@
 
 extern char **environ;
 
+/* Log a message to stderr (captured by RootHelperManager). */
+#define LOG(fmt, ...) \
+    fprintf(stderr, "[RootHelper] " fmt "\n", ##__VA_ARGS__)
+
+/* Log to stdout (captured as success message). */
+#define LOG_OK(fmt, ...) \
+    printf("[RootHelper] " fmt "\n", ##__VA_ARGS__)
+
 /* ── run_shell: replacement for system() using posix_spawn ────────────── */
 static int run_shell(const char *cmd) {
     if (!cmd || !*cmd) return -1;
@@ -165,14 +173,6 @@ static int try_killall(const char *signal, const char *process) {
 typedef int bool_t;
 #define TRUE  1
 #define FALSE 0
-
-/* Log a message to stderr (captured by RootHelperManager). */
-#define LOG(fmt, ...) \
-    fprintf(stderr, "[RootHelper] " fmt "\n", ##__VA_ARGS__)
-
-/* Log to stdout (captured as success message). */
-#define LOG_OK(fmt, ...) \
-    printf("[RootHelper] " fmt "\n", ##__VA_ARGS__)
 
 /* --------------------------------------------------------------------------
  * posix_spawn wrapper

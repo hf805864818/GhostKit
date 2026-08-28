@@ -14,7 +14,9 @@ static UIWindow * GhostKitGetKeyWindow(void) {
     UIWindow *window = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (scene.activationState != UISceneActivationStateForegroundActive) continue;
-        for (UIWindow *w in scene.windows) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        for (UIWindow *w in windowScene.windows) {
             window = w;
             break;
         }
